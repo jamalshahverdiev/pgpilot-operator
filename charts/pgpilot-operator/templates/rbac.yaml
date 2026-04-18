@@ -1,0 +1,91 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "pgpilot-operator.fullname" . }}-manager
+  labels:
+    {{- include "pgpilot-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps, services]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [monitoring.coreos.com]
+    resources: [servicemonitors]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [pgpilot.io]
+    resources: [pgpilotmetriclibraries]
+    verbs: [get, list, watch]
+  - apiGroups: [pgpilot.io]
+    resources: [pgpilotmetriclibraries/status, pgpilotmonitors/status]
+    verbs: [get, patch, update]
+  - apiGroups: [pgpilot.io]
+    resources: [pgpilotmonitors]
+    verbs: [get, list, patch, update, watch]
+  - apiGroups: [pgpilot.io]
+    resources: [pgpilotmonitors/finalizers]
+    verbs: [update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "pgpilot-operator.fullname" . }}-manager
+  labels:
+    {{- include "pgpilot-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "pgpilot-operator.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "pgpilot-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+{{- if and .Values.rbac.create .Values.leaderElection.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "pgpilot-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pgpilot-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "pgpilot-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pgpilot-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "pgpilot-operator.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "pgpilot-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

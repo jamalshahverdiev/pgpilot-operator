@@ -1,0 +1,18 @@
+apiVersion: v2
+name: pgpilot-operator
+description: Kubernetes operator for declarative PostgreSQL monitoring via pgwatch
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/jamalshahverdiyev/pgpilot-operator
+sources:
+  - https://github.com/jamalshahverdiyev/pgpilot-operator
+maintainers:
+  - name: Jamal Shahverdiyev
+keywords:
+  - postgresql
+  - monitoring
+  - pgwatch
+  - observability
+  - operator
