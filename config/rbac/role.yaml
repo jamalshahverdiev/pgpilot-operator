@@ -1,0 +1,92 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - servicemonitors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - pgpilot.io
+  resources:
+  - pgpilotmetriclibraries
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - pgpilot.io
+  resources:
+  - pgpilotmetriclibraries/status
+  - pgpilotmonitors/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - pgpilot.io
+  resources:
+  - pgpilotmonitors
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - pgpilot.io
+  resources:
+  - pgpilotmonitors/finalizers
+  verbs:
+  - update

@@ -1,0 +1,38 @@
+apiVersion: pgpilot.io/v1
+kind: PgpilotMetricLibrary
+metadata:
+  name: business-metrics
+  namespace: team-users
+  labels:
+    app.kubernetes.io/name: pgpilot-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  metrics:
+    - name: orders_queue_depth
+      description: "Orders stuck in pending state"
+      interval: 60s
+      statementTimeoutSeconds: 5
+      sqls:
+        "13": |
+          SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
+                 count(*) AS stuck_orders,
+                 max(extract(epoch from now() - created_at))::int AS max_age_sec
+          FROM orders
+          WHERE status = 'pending'
+            AND created_at < now() - interval '10 min'
+      gauges:
+        - "*"
+
+    - name: payments_failed_rate
+      description: "Failed payment count over the last minute"
+      interval: 30s
+      statementTimeoutSeconds: 5
+      sqls:
+        "13": |
+          SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
+                 count(*) AS failed
+          FROM payments
+          WHERE state = 'failed'
+            AND created_at > now() - interval '1 min'
+      gauges:
+        - "*"

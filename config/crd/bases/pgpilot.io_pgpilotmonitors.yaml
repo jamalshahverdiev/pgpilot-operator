@@ -1,0 +1,523 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: pgpilotmonitors.pgpilot.io
+spec:
+  group: pgpilot.io
+  names:
+    kind: PgpilotMonitor
+    listKind: PgpilotMonitorList
+    plural: pgpilotmonitors
+    shortNames:
+    - pm
+    singular: pgpilotmonitor
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .status.podName
+      name: Pod
+      priority: 1
+      type: string
+    - jsonPath: .spec.database.host
+      name: Host
+      priority: 1
+      type: string
+    - jsonPath: .spec.database.database
+      name: DB
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PgpilotMonitor declares that pgpilot-operator should run a pgwatch
+          collector against the described PostgreSQL database and expose its
+          metrics via the configured sinks. It is namespace-scoped and users may
+          create any number of them in any namespace.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of PgpilotMonitor
+            properties:
+              database:
+                description: database is the PostgreSQL target pgwatch will monitor.
+                properties:
+                  credentialsSecret:
+                    description: |-
+                      credentialsSecret references a Secret in the same namespace that
+                      holds the connection credentials. Preferred over inline username/
+                      password.
+                    properties:
+                      name:
+                        description: name of the Secret.
+                        minLength: 1
+                        type: string
+                      passwordKey:
+                        default: password
+                        description: |-
+                          passwordKey is the key inside the Secret containing the database
+                          password. Defaults to "password".
+                        type: string
+                      usernameKey:
+                        default: username
+                        description: |-
+                          usernameKey is the key inside the Secret containing the database
+                          username. Defaults to "username".
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  customTags:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      customTags are added to every measurement as additional labels.
+                      Useful for `env`, `team`, `tier`, etc. Passed through to pgwatch
+                      source configuration verbatim.
+                    type: object
+                  database:
+                    description: database is the logical database name pgwatch connects
+                      to.
+                    minLength: 1
+                    type: string
+                  host:
+                    description: host of the PostgreSQL server (DNS name or IP).
+                    minLength: 1
+                    type: string
+                  password:
+                    description: |-
+                      password is the database password. See the note on `username` — only
+                      suitable for dev/test.
+                    minLength: 1
+                    type: string
+                  port:
+                    default: 5432
+                    description: port of the PostgreSQL server.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  sslmode:
+                    default: disable
+                    description: sslmode selects TLS behaviour (libpq sslmode semantics).
+                    enum:
+                    - disable
+                    - allow
+                    - prefer
+                    - require
+                    - verify-ca
+                    - verify-full
+                    type: string
+                  username:
+                    description: |-
+                      username is the database user. Prefer credentialsSecret for production
+                      — values set here are stored in etcd in clear text.
+                    minLength: 1
+                    type: string
+                required:
+                - database
+                - host
+                type: object
+                x-kubernetes-validations:
+                - message: set either inline username+password or credentialsSecret,
+                    not both (and not neither)
+                  rule: (has(self.username) && has(self.password)) != has(self.credentialsSecret)
+                - message: password is required when username is set inline
+                  rule: '!has(self.username) || has(self.password)'
+                - message: username is required when password is set inline
+                  rule: '!has(self.password) || has(self.username)'
+              image:
+                description: image overrides the pgwatch image coordinates.
+                properties:
+                  pullPolicy:
+                    default: IfNotPresent
+                    description: pullPolicy for the image.
+                    enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                    type: string
+                  repository:
+                    default: cybertecpostgresql/pgwatch
+                    description: repository of the pgwatch image.
+                    type: string
+                  tag:
+                    default: 5.1.0
+                    description: tag of the pgwatch image.
+                    type: string
+                type: object
+              metrics:
+                description: metrics selects what pgwatch collects.
+                properties:
+                  custom:
+                    description: |-
+                      custom is an inline list of metric definitions. Prefer libraries for
+                      anything reused across monitors.
+                    items:
+                      description: |-
+                        MetricDefinition describes one pgwatch SQL metric. It is the unit shared
+                        between PgpilotMetricLibrary (reusable sets) and PgpilotMonitor.spec.metrics.custom
+                        (inline one-offs). The operator merges these with the pgwatch built-in
+                        preset selected by the user and materialises a metrics.yaml for pgwatch.
+                      properties:
+                        description:
+                          description: description is a free-form human-readable hint.
+                            Not used by pgwatch.
+                          type: string
+                        gauges:
+                          description: |-
+                            gauges lists the result columns treated as gauges (vs counters).
+                            Use ["*"] to mark every non-tag column as a gauge — this matches
+                            how pgwatch built-in metrics are written.
+                          items:
+                            type: string
+                          type: array
+                        interval:
+                          description: |-
+                            interval is the collection period (e.g. "60s", "5m"). If omitted,
+                            pgwatch defaults apply.
+                          type: string
+                        isInstanceLevel:
+                          description: isInstanceLevel marks the metric as instance-wide
+                            (not database-scoped).
+                          type: boolean
+                        masterOnly:
+                          description: masterOnly restricts collection to primary
+                            PostgreSQL instances.
+                          type: boolean
+                        name:
+                          description: |-
+                            name is the pgwatch metric name. Used as the key in metrics.yaml and
+                            as the series name when shipped to Prometheus / gRPC sinks.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z_][a-z0-9_]*$
+                          type: string
+                        sqls:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            sqls maps PostgreSQL major version (as a string, e.g. "13", "14")
+                            to the SQL statement pgwatch will execute on that version. The key
+                            "*" (or the lowest-version entry) acts as a fallback — exact semantics
+                            match pgwatch's own metrics.yaml.
+                          minProperties: 1
+                          type: object
+                        standbyOnly:
+                          description: standbyOnly restricts collection to standby
+                            (replica) instances.
+                          type: boolean
+                        statementTimeoutSeconds:
+                          description: |-
+                            statementTimeoutSeconds limits execution time for the SQL. 0 means
+                            no explicit timeout. pgwatch enforces this per-query.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - name
+                      - sqls
+                      type: object
+                    type: array
+                  fromLibraries:
+                    description: |-
+                      fromLibraries references PgpilotMetricLibrary CRs in the same
+                      namespace whose metrics should be included.
+                    items:
+                      description: |-
+                        LibraryRef points to a PgpilotMetricLibrary in the same namespace.
+                        Cross-namespace references are intentionally not supported in v1.0.0.
+                      properties:
+                        name:
+                          description: name of the PgpilotMetricLibrary.
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  preset:
+                    description: |-
+                      preset is the name of a pgwatch built-in preset (e.g. "basic",
+                      "standard", "exhaustive", "recommendations", "rds", "aurora").
+                      Leave empty to rely entirely on libraries and custom metrics.
+                    type: string
+                type: object
+              podMetadata:
+                description: |-
+                  podMetadata extends labels and annotations on the generated Pod
+                  template. Used for vmagent / Prometheus annotation-based discovery
+                  (e.g. prometheus.io/scrape), team ownership, etc.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: annotations to add on top of system-managed annotations.
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: labels to add on top of system-managed labels.
+                    type: object
+                type: object
+              resources:
+                description: resources overrides requests/limits on the pgwatch container.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This field depends on the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              serviceMetadata:
+                description: |-
+                  serviceMetadata extends labels and annotations on the generated
+                  Service. Used for label-selector-based scrape configs and for
+                  ServiceMonitor selection.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: annotations to add on top of system-managed annotations.
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: labels to add on top of system-managed labels.
+                    type: object
+                type: object
+              sinks:
+                description: |-
+                  sinks configures where measurements go. At least one sink must be
+                  enabled.
+                properties:
+                  grpc:
+                    description: |-
+                      grpc configures the push-based gRPC sink. pgpilot-operator does
+                      not ship a receiver — this is a pass-through for users that run
+                      their own, or for future pgpilot action-operators.
+                    properties:
+                      enabled:
+                        default: false
+                        description: enabled toggles the sink.
+                        type: boolean
+                      endpoint:
+                        description: endpoint is the host:port of the gRPC Receiver.
+                        type: string
+                      tls:
+                        description: |-
+                          tls configures optional TLS for the gRPC connection. When nil, the
+                          connection is plaintext.
+                        properties:
+                          caSecretRef:
+                            description: |-
+                              caSecretRef is the name of a Secret in the same namespace that
+                              contains the CA certificate under the key "ca.crt".
+                            type: string
+                        type: object
+                    required:
+                    - enabled
+                    type: object
+                  prometheus:
+                    description: |-
+                      prometheus configures the pull-based Prometheus sink (pgwatch
+                      exposes /metrics on the pod).
+                    properties:
+                      enabled:
+                        default: true
+                        description: enabled toggles the sink.
+                        type: boolean
+                      port:
+                        default: 9187
+                        description: port the pgwatch process listens on for /metrics.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    required:
+                    - enabled
+                    type: object
+                type: object
+            required:
+            - database
+            - metrics
+            - sinks
+            type: object
+          status:
+            description: status defines the observed state of PgpilotMonitor
+            properties:
+              conditions:
+                description: |-
+                  conditions reflects the current state of the PgpilotMonitor.
+                  Typical types:
+                    - "Ready"             — Pod is up and scraping
+                    - "ConfigGenerated"   — ConfigMap matches spec
+                    - "DatabaseReachable" — pgwatch can connect to the target DB
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              configHash:
+                description: |-
+                  configHash is the SHA-256 digest of the rendered sources.yaml +
+                  metrics.yaml payload. A change here means the underlying pgwatch
+                  Deployment has been (or will be) rolled.
+                type: string
+              lastReconciled:
+                description: lastReconciled is the timestamp of the last successful
+                  reconcile.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation the controller last
+                  reconciled. Comparing this with metadata.generation lets tools
+                  detect in-flight updates.
+                format: int64
+                type: integer
+              podName:
+                description: podName is the name of the currently-running pgwatch
+                  Pod, if any.
+                type: string
+              ready:
+                description: |-
+                  ready is true when the underlying pgwatch Pod is Running and has
+                  passed its readiness probe.
+                type: boolean
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

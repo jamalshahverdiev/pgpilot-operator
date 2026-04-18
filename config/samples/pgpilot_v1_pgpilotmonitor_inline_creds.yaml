@@ -1,0 +1,28 @@
+## Example: inline credentials for dev/test.
+## For production use `pgpilot_v1_pgpilotmonitor.yaml` (Secret-based) instead —
+## the fields `database.username` and `database.password` are stored in etcd
+## in clear text and visible via `kubectl get`.
+
+apiVersion: pgpilot.io/v1
+kind: PgpilotMonitor
+metadata:
+  name: dev-inline
+  namespace: dev
+spec:
+  database:
+    host: postgres.dev.svc.cluster.local
+    port: 5432
+    database: appdb
+    sslmode: disable
+    username: pgwatch
+    password: pgwatch-dev-password
+    customTags:
+      env: dev
+
+  metrics:
+    preset: basic
+
+  sinks:
+    prometheus:
+      enabled: true
+      port: 9187

@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- pgpilot_v1_pgpilotmonitor.yaml
+- pgpilot_v1_pgpilotmetriclibrary.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

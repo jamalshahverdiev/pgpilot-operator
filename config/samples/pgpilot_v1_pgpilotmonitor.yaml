@@ -1,0 +1,62 @@
+apiVersion: pgpilot.io/v1
+kind: PgpilotMonitor
+metadata:
+  name: prod-users-db
+  namespace: team-users
+  labels:
+    app.kubernetes.io/name: pgpilot-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  database:
+    host: users-db.team-users.svc.cluster.local
+    port: 5432
+    database: users
+    sslmode: require
+    credentialsSecret:
+      name: users-db-monitor-creds
+    customTags:
+      env: prod
+      team: users
+
+  metrics:
+    preset: exhaustive
+    fromLibraries:
+      - name: business-metrics
+    custom:
+      - name: active_users
+        description: "Users seen within the last 5 minutes"
+        interval: 60s
+        sqls:
+          "13": |
+            SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
+                   count(*) AS active
+            FROM users
+            WHERE last_seen > now() - interval '5 min'
+        gauges:
+          - "*"
+
+  sinks:
+    prometheus:
+      enabled: true
+      port: 9187
+    grpc:
+      enabled: false
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+  podMetadata:
+    labels:
+      team: users
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
+      prometheus.io/path: "/metrics"
+
+  serviceMetadata:
+    labels:
+      monitoring: enabled
