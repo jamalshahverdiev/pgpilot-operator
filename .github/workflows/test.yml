@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, "*.*.x"]
+  pull_request:
+
+jobs:
+  unit:
+    name: Unit + envtest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: make test
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out

@@ -1,0 +1,31 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, "*.*.x"]
+  pull_request:
+
+jobs:
+  go-lint:
+    name: Go lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.7.2
+
+  helm-lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - run: helm lint charts/pgpilot-operator/ --strict
