@@ -1,0 +1,152 @@
+services:
+  postgres-primary:
+    image: postgres:16-alpine
+    container_name: pgpilot-testdb-primary
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init/primary.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - pgdata-primary:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-secondary:
+    image: postgres:16-alpine
+    container_name: pgpilot-testdb-secondary
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    ports:
+      - "15433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init/secondary.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - pgdata-secondary:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  workload-primary:
+    image: postgres:16-alpine
+    container_name: pgpilot-testdb-workload-primary
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-primary
+      TARGET_DB: app_primary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init/workload-primary.sh:/workload.sh:ro
+    entrypoint: ["/bin/sh", "/workload.sh"]
+
+  workload-secondary:
+    image: postgres:16-alpine
+    container_name: pgpilot-testdb-workload-secondary
+    depends_on:
+      postgres-secondary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-secondary
+      TARGET_DB: app_secondary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init/workload-secondary.sh:/workload.sh:ro
+    entrypoint: ["/bin/sh", "/workload.sh"]
+
+  # --- Stress scenarios (opt-in via `--profile stress`) ---------------------
+  # Each one simulates a class of production incident so the corresponding
+  # pgwatch metric moves visibly. See hack/testdb/scenarios.md for details.
+
+  stress-bloat:
+    image: postgres:16-alpine
+    profiles: [stress]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-primary
+      TARGET_DB: app_primary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./stress/bloat.sh:/run.sh:ro
+    entrypoint: ["/bin/sh", "/run.sh"]
+    restart: unless-stopped
+
+  stress-locks:
+    image: postgres:16-alpine
+    profiles: [stress]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-primary
+      TARGET_DB: app_primary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      HOLDERS: "5"
+      HOLDER_SECS: "600"
+    volumes:
+      - ./stress/locks.sh:/run.sh:ro
+    entrypoint: ["/bin/sh", "/run.sh"]
+    restart: unless-stopped
+
+  stress-planner:
+    image: postgres:16-alpine
+    profiles: [stress]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-primary
+      TARGET_DB: app_primary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      SNAPSHOT_SECS: "600"
+    volumes:
+      - ./stress/planner.sh:/run.sh:ro
+    entrypoint: ["/bin/sh", "/run.sh"]
+    restart: unless-stopped
+
+  stress-idle-tx:
+    image: postgres:16-alpine
+    profiles: [stress]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-primary
+      TARGET_DB: app_primary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      IDLE_TX_SECS: "7200"
+    volumes:
+      - ./stress/idle-tx.sh:/run.sh:ro
+    entrypoint: ["/bin/sh", "/run.sh"]
+    restart: unless-stopped
+
+volumes:
+  pgdata-primary:
+  pgdata-secondary:
