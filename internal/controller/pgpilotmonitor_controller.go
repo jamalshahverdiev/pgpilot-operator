@@ -228,7 +228,7 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		client.InNamespace(monitor.Namespace),
 		client.MatchingLabels{
 			builder.LabelAppInstance: monitor.Name,
-			builder.LabelAppName:    builder.AppName,
+			builder.LabelAppName:     builder.AppName,
 		},
 	); err == nil && len(podList.Items) > 0 {
 		monitor.Status.PodName = podList.Items[0].Name
@@ -312,9 +312,9 @@ func (r *PgpilotMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return b.Watches(
-			&pgpilotv1.PgpilotMetricLibrary{},
-			handler.EnqueueRequestsFromMapFunc(r.libraryToMonitors),
-		).
+		&pgpilotv1.PgpilotMetricLibrary{},
+		handler.EnqueueRequestsFromMapFunc(r.libraryToMonitors),
+	).
 		Named("pgpilotmonitor").
 		Complete(r)
 }

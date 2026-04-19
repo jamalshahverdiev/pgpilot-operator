@@ -71,15 +71,19 @@ same user rows (IDs 1–10), then sleep for `HOLDER_SECS=600` seconds.
 The regular workload's `UPDATE users SET last_seen = now()` blocks
 behind them. Simulates a leaky connection pool that never commits.
 
-Expected signals:
+Expected signals (note: since all holders try `FOR UPDATE` on the same
+rows, PostgreSQL serializes them — only the first one gets the lock and
+becomes idle-in-transaction; the rest sit waiting and show up as blocked
+queries / tuple locks):
 
 | Metric | Expected value |
 |--------|---------------|
-| `pgwatch_backends_idleintransaction` | `>= HOLDERS` |
-| `pgwatch_backends_longest_tx_seconds` | grows to `HOLDER_SECS` |
-| `pgwatch_locks_count{locktype="transactionid"}` | grows with waiters |
-| `pgwatch_locks_mode_count{lockmode="RowExclusiveLock"}` | same |
-| `pgwatch_db_stats_deadlocks` | stays `0` (no deadlocks, just blocking) |
+| `pgwatch_backends_idleintransaction` | `== 1` (the current holder) |
+| `pgwatch_backends_longest_tx_seconds` | grows while a holder sleeps |
+| `pgwatch_backends_longest_query_seconds` | grows on waiters (they're blocked mid-query) |
+| `pgwatch_locks_count{locktype="tuple"}` | `== HOLDERS - 1` (waiters) |
+| `pgwatch_locks_mode_count{lockmode="RowShareLock"}` | grows (FOR UPDATE individual row locks) |
+| `pgwatch_db_stats_deadlocks` | stays `0` (no cycles, just blocking) |
 
 ### stress-planner — snapshot pinning + seq_scan storm
 
@@ -103,8 +107,10 @@ Expected signals:
 | `pgwatch_table_stats_seq_scan{table_name="orders"}` | ↑ fast |
 | `pgwatch_table_stats_seq_scan{table_name="users"}` | ↑ |
 | `pgwatch_backends_longest_query_seconds` | spikes to snapshot duration |
-| `pgwatch_backends_max_xmin_age_tx` | ↑ |
-| `pgwatch_db_stats_blks_read` | ↑ (cache misses on seq scans) |
+| `pgwatch_backends_max_xmin_age_tx` | ↑ (xmin pinned by REPEATABLE READ snapshot holder) |
+| `pgwatch_backends_longest_tx_seconds` | ↑ to `SNAPSHOT_SECS` |
+| `pgwatch_table_stats_n_tup_ins{table_name="orders"}` | ↑ (bulk INSERT loop) |
+| `pgwatch_db_stats_blks_read` | ↑ only if data doesn't fit in shared_buffers; on a small test DB this may stay flat because the whole table is cached |
 
 ### stress-idle-tx — lone idle-in-transaction holder
 

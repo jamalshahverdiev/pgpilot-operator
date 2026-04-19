@@ -119,9 +119,9 @@ type CredentialsSecretRef struct {
 // MetricsSpec selects which metrics pgwatch collects. The effective
 // metrics.yaml is the union of:
 //
-//   1. the chosen pgwatch built-in preset (if any),
-//   2. all metrics from every referenced PgpilotMetricLibrary,
-//   3. every inline custom metric.
+//  1. the chosen pgwatch built-in preset (if any),
+//  2. all metrics from every referenced PgpilotMetricLibrary,
+//  3. every inline custom metric.
 //
 // Later entries override earlier ones by metric name.
 type MetricsSpec struct {

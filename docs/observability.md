@@ -98,6 +98,26 @@ spec:
       prometheus.io/port: "8080"
 ```
 
+## Example Grafana dashboard
+
+A starter dashboard is provided at
+[`examples/grafana/pgpilot-overview.json`](../examples/grafana/pgpilot-overview.json).
+It has five row-groups driven by the labels the operator emits
+(`dbname`, `env`, `instance`, `table_name`, `query`, `locktype`):
+
+- **Overview** — DB size, idle-in-transaction, xmin age, deadlocks
+- **Backends & Locks** — connection state over time, locks by type
+- **Tables & Bloat** — seq_scan rate, dead tuples, bloat %, unused indexes
+- **Query performance** — top 10 slowest queries
+- **WAL & I/O** — WAL generation rate, checkpoint rate
+
+For local development, the helper at
+[`hack/monitoring/setup.sh`](../hack/monitoring/README.md) brings up
+kube-prometheus-stack in a separate namespace and imports the dashboard
+automatically. **That helper is dev-only — kube-prometheus-stack is not
+a pgpilot-operator dependency**, it's just a convenient way to run through
+the full operator → Prometheus → Grafana path during development.
+
 ## Available metrics
 
 pgwatch exposes metrics based on the selected preset. Examples:

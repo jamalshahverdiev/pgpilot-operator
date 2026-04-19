@@ -7,10 +7,10 @@ import (
 
 const (
 	LabelAppName      = "app.kubernetes.io/name"
-	LabelAppInstance   = "app.kubernetes.io/instance"
-	LabelAppManagedBy  = "app.kubernetes.io/managed-by"
-	LabelAppComponent  = "app.kubernetes.io/component"
-	LabelMonitorName   = "pgpilot.io/monitor"
+	LabelAppInstance  = "app.kubernetes.io/instance"
+	LabelAppManagedBy = "app.kubernetes.io/managed-by"
+	LabelAppComponent = "app.kubernetes.io/component"
+	LabelMonitorName  = "pgpilot.io/monitor"
 
 	AnnotationConfigHash = "pgpilot.io/config-hash"
 
@@ -20,8 +20,8 @@ const (
 
 func SystemLabels(monitorName string) map[string]string {
 	return map[string]string{
-		LabelAppName:     AppName,
-		LabelAppInstance: monitorName,
+		LabelAppName:      AppName,
+		LabelAppInstance:  monitorName,
 		LabelAppManagedBy: ManagedBy,
 		LabelAppComponent: "pgwatch",
 		LabelMonitorName:  monitorName,

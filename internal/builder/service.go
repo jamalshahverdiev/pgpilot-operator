@@ -31,7 +31,7 @@ func BuildService(monitor *pgpilotv1.PgpilotMonitor) *corev1.Service {
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
 				LabelAppInstance: monitor.Name,
-				LabelAppName:    AppName,
+				LabelAppName:     AppName,
 			},
 			Ports: []corev1.ServicePort{
 				{

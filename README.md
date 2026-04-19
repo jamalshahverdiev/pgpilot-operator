@@ -83,8 +83,16 @@ kubectl get pods -n my-team -l pgpilot.io/monitor=my-db
 - [Quickstart](docs/quickstart.md) — step-by-step with local PostgreSQL
 - [CRD Reference](docs/crd-reference.md) — every field of both CRDs
 - [Architecture](docs/architecture.md) — how the operator produces pgwatch pods
-- [Observability](docs/observability.md) — Prometheus, vmagent, ServiceMonitor examples
+- [Observability](docs/observability.md) — Prometheus, vmagent, ServiceMonitor, Grafana dashboard
 - [Troubleshooting](docs/troubleshooting.md)
+
+## Example Grafana dashboard
+
+A starter dashboard for the metrics pgwatch produces is available at
+[`examples/grafana/pgpilot-overview.json`](examples/grafana/pgpilot-overview.json).
+Import it into your own Grafana, or use
+[`hack/monitoring/setup.sh`](hack/monitoring/README.md) to spin up a
+local Prometheus + Grafana stack for development and see it in action.
 
 ## CRDs
 

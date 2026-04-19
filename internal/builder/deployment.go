@@ -49,7 +49,7 @@ func BuildDeployment(
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					LabelAppInstance: monitor.Name,
-					LabelAppName:    AppName,
+					LabelAppName:     AppName,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
@@ -71,7 +71,7 @@ func BuildDeployment(
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},
-							Resources: monitor.Spec.Resources,
+							Resources:      monitor.Spec.Resources,
 							LivenessProbe:  tcpProbe(promPort, 15, 20),
 							ReadinessProbe: tcpProbe(promPort, 5, 10),
 							SecurityContext: &corev1.SecurityContext{

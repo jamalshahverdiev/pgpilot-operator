@@ -25,7 +25,7 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					LabelAppInstance: monitor.Name,
-					LabelAppName:    AppName,
+					LabelAppName:     AppName,
 				},
 			},
 			NamespaceSelector: monitoringv1.NamespaceSelector{
@@ -33,8 +33,8 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
-					Port:     "metrics",
-					Interval: monitoringv1.Duration("30s"),
+					Port:          "metrics",
+					Interval:      monitoringv1.Duration("30s"),
 					ScrapeTimeout: monitoringv1.Duration("10s"),
 				},
 			},
