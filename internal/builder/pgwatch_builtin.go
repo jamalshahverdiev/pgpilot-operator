@@ -3,6 +3,7 @@ package builder
 import (
 	_ "embed"
 	"fmt"
+	"maps"
 
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -34,12 +35,8 @@ func expandPresetIntoIntervals(presetName string, userIntervals map[string]int) 
 	}
 
 	out := make(map[string]int, len(preset.Metrics)+len(userIntervals))
-	for name, interval := range preset.Metrics {
-		out[name] = interval
-	}
-	for name, interval := range userIntervals {
-		out[name] = interval
-	}
+	maps.Copy(out, preset.Metrics)
+	maps.Copy(out, userIntervals)
 	return out, nil
 }
 

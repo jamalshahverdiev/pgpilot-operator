@@ -8,11 +8,11 @@ func TestBuildServiceMonitor_BasicShape(t *testing.T) {
 	monitor := newTestMonitor()
 	sm := BuildServiceMonitor(monitor)
 
-	if sm.Name != "pgpilot-test-db" {
-		t.Errorf("name: got %q, want %q", sm.Name, "pgpilot-test-db")
+	if sm.Name != testDeploymentName {
+		t.Errorf("name: got %q, want %q", sm.Name, testDeploymentName)
 	}
-	if sm.Namespace != "team-test" {
-		t.Errorf("namespace: got %q, want %q", sm.Namespace, "team-test")
+	if sm.Namespace != testMonitorNS {
+		t.Errorf("namespace: got %q, want %q", sm.Namespace, testMonitorNS)
 	}
 }
 
@@ -21,7 +21,7 @@ func TestBuildServiceMonitor_Selector(t *testing.T) {
 	sm := BuildServiceMonitor(monitor)
 
 	sel := sm.Spec.Selector.MatchLabels
-	if sel[LabelAppInstance] != "test-db" {
+	if sel[LabelAppInstance] != testMonitorName {
 		t.Errorf("selector instance: got %q", sel[LabelAppInstance])
 	}
 	if sel[LabelAppName] != AppName {
@@ -53,7 +53,7 @@ func TestBuildServiceMonitor_NamespaceSelector(t *testing.T) {
 	sm := BuildServiceMonitor(monitor)
 
 	ns := sm.Spec.NamespaceSelector.MatchNames
-	if len(ns) != 1 || ns[0] != "team-test" {
+	if len(ns) != 1 || ns[0] != testMonitorNS {
 		t.Errorf("namespace selector: got %v, want [team-test]", ns)
 	}
 }

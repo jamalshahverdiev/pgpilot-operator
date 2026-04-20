@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -167,12 +168,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 				if err := k8sClient.Get(context.TODO(), types.NamespacedName{Name: "test-db", Namespace: ns.Name}, &m); err != nil {
 					return false
 				}
-				for _, f := range m.Finalizers {
-					if f == finalizerName {
-						return true
-					}
-				}
-				return false
+				return slices.Contains(m.Finalizers, finalizerName)
 			}, timeout, interval).Should(BeTrue())
 		})
 

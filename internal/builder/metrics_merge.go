@@ -69,7 +69,7 @@ func MergeMetrics(
 func addMetric(m *MergedMetrics, md pgpilotv1.MetricDefinition) {
 	interval := defaultInterval
 	if md.Interval != nil {
-		interval = int(md.Interval.Duration.Seconds())
+		interval = int(md.Interval.Seconds())
 	}
 	if interval <= 0 {
 		interval = defaultInterval

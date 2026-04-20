@@ -3,6 +3,7 @@ package builder
 import (
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
@@ -169,12 +170,8 @@ func renderMetrics(merged MergedMetrics) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		for n, m := range bm {
-			metrics[n] = m
-		}
-		for n, p := range bp {
-			presets[n] = p
-		}
+		maps.Copy(metrics, bm)
+		maps.Copy(presets, bp)
 	}
 
 	// Merge user custom definitions on top (override by name).
