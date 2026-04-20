@@ -10,11 +10,11 @@ func TestBuildService_BasicShape(t *testing.T) {
 	monitor := newTestMonitor()
 	svc := BuildService(monitor)
 
-	if svc.Name != "pgpilot-test-db" {
-		t.Errorf("name: got %q, want %q", svc.Name, "pgpilot-test-db")
+	if svc.Name != testDeploymentName {
+		t.Errorf("name: got %q, want %q", svc.Name, testDeploymentName)
 	}
-	if svc.Namespace != "team-test" {
-		t.Errorf("namespace: got %q, want %q", svc.Namespace, "team-test")
+	if svc.Namespace != testMonitorNS {
+		t.Errorf("namespace: got %q, want %q", svc.Namespace, testMonitorNS)
 	}
 	if len(svc.Spec.Ports) != 1 {
 		t.Fatalf("ports: got %d, want 1", len(svc.Spec.Ports))
@@ -28,7 +28,7 @@ func TestBuildService_Selector(t *testing.T) {
 	monitor := newTestMonitor()
 	svc := BuildService(monitor)
 
-	if svc.Spec.Selector[LabelAppInstance] != "test-db" {
+	if svc.Spec.Selector[LabelAppInstance] != testMonitorName {
 		t.Errorf("selector instance: got %q", svc.Spec.Selector[LabelAppInstance])
 	}
 	if svc.Spec.Selector[LabelAppName] != AppName {
@@ -43,7 +43,7 @@ func TestBuildService_SystemLabels(t *testing.T) {
 	if svc.Labels[LabelAppName] != AppName {
 		t.Errorf("app name label: got %q", svc.Labels[LabelAppName])
 	}
-	if svc.Labels[LabelMonitorName] != "test-db" {
+	if svc.Labels[LabelMonitorName] != testMonitorName {
 		t.Errorf("monitor name label: got %q", svc.Labels[LabelMonitorName])
 	}
 }

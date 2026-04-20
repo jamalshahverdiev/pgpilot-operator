@@ -10,11 +10,17 @@ import (
 	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
 )
 
+const (
+	testMonitorName    = "test-db"
+	testMonitorNS      = "team-test"
+	testDeploymentName = "pgpilot-test-db"
+)
+
 func newTestMonitor() *pgpilotv1.PgpilotMonitor {
 	return &pgpilotv1.PgpilotMonitor{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-db",
-			Namespace: "team-test",
+			Name:      testMonitorName,
+			Namespace: testMonitorNS,
 		},
 		Spec: pgpilotv1.PgpilotMonitorSpec{
 			Database: pgpilotv1.DatabaseRef{
@@ -196,14 +202,14 @@ func TestBuildConfigMap_Labels(t *testing.T) {
 
 	cm, _, _ := BuildConfigMap(monitor, merged)
 
-	if cm.Labels[LabelMonitorName] != "test-db" {
-		t.Errorf("label %s: got %q, want %q", LabelMonitorName, cm.Labels[LabelMonitorName], "test-db")
+	if cm.Labels[LabelMonitorName] != testMonitorName {
+		t.Errorf("label %s: got %q, want %q", LabelMonitorName, cm.Labels[LabelMonitorName], testMonitorName)
 	}
 	if cm.Name != "pgpilot-test-db-config" {
 		t.Errorf("name: got %q, want %q", cm.Name, "pgpilot-test-db-config")
 	}
-	if cm.Namespace != "team-test" {
-		t.Errorf("namespace: got %q, want %q", cm.Namespace, "team-test")
+	if cm.Namespace != testMonitorNS {
+		t.Errorf("namespace: got %q, want %q", cm.Namespace, testMonitorNS)
 	}
 }
 

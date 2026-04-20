@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,11 +15,11 @@ func TestBuildDeployment_BasicShape(t *testing.T) {
 	merged := MergedMetrics{Preset: "basic"}
 	dep := BuildDeployment(monitor, merged, "abc123")
 
-	if dep.Name != "pgpilot-test-db" {
-		t.Errorf("name: got %q, want %q", dep.Name, "pgpilot-test-db")
+	if dep.Name != testDeploymentName {
+		t.Errorf("name: got %q, want %q", dep.Name, testDeploymentName)
 	}
-	if dep.Namespace != "team-test" {
-		t.Errorf("namespace: got %q, want %q", dep.Namespace, "team-test")
+	if dep.Namespace != testMonitorNS {
+		t.Errorf("namespace: got %q, want %q", dep.Namespace, testMonitorNS)
 	}
 	if *dep.Spec.Replicas != 1 {
 		t.Errorf("replicas: got %d, want 1", *dep.Spec.Replicas)
@@ -99,14 +100,7 @@ func TestBuildDeployment_Args_MetricsFile_WhenPresetOrCustom(t *testing.T) {
 	// Preset alone → --metrics arg present (we ship the built-in registry).
 	merged = MergedMetrics{Preset: "basic"}
 	dep = BuildDeployment(monitor, merged, "h")
-	found := false
-	for _, a := range dep.Spec.Template.Spec.Containers[0].Args {
-		if a == "--metrics" {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(dep.Spec.Template.Spec.Containers[0].Args, "--metrics") {
 		t.Error("--metrics arg should be present when preset is set")
 	}
 }

@@ -98,39 +98,8 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// --- Step 1: Validate credentials source. ---
-	// CRD validation enforces "exactly one of inline or credentialsSecret".
-	// For inline we can't verify anything beyond schema. For secret we check
-	// existence so the pod doesn't CrashLoop on missing reference.
-	db := monitor.Spec.Database
-	switch {
-	case db.Username != "" && db.Password != "":
-		r.setCondition(&monitor, "DatabaseReachable", metav1.ConditionTrue, "InlineCredentials",
-			"Inline username/password configured")
-	case db.CredentialsSecret != nil:
-		var secret corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Name: db.CredentialsSecret.Name, Namespace: monitor.Namespace}, &secret); err != nil {
-			log.Error(err, "credentials secret not found", "secret", db.CredentialsSecret.Name)
-			r.setCondition(&monitor, "Ready", metav1.ConditionFalse, "SecretNotFound",
-				fmt.Sprintf("Secret %q not found: %v", db.CredentialsSecret.Name, err))
-			r.setCondition(&monitor, "DatabaseReachable", metav1.ConditionFalse, "SecretNotFound",
-				fmt.Sprintf("Credentials secret %q not found", db.CredentialsSecret.Name))
-			r.Recorder.Eventf(&monitor, corev1.EventTypeWarning, "SecretNotFound",
-				"Credentials secret %q not found in namespace %q", db.CredentialsSecret.Name, monitor.Namespace)
-			if statusErr := r.patchStatus(ctx, &monitor); statusErr != nil {
-				log.Error(statusErr, "failed to update status")
-			}
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		r.setCondition(&monitor, "DatabaseReachable", metav1.ConditionTrue, "CredentialsFound",
-			fmt.Sprintf("Credentials secret %q exists", db.CredentialsSecret.Name))
-	default:
-		// Should be prevented by CRD validation; defensive check.
-		r.setCondition(&monitor, "Ready", metav1.ConditionFalse, "NoCredentials",
-			"spec.database has no inline username/password and no credentialsSecret")
-		if statusErr := r.patchStatus(ctx, &monitor); statusErr != nil {
-			log.Error(statusErr, "failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	if result, ok, err := r.validateCredentials(ctx, &monitor); !ok {
+		return result, err
 	}
 
 	// --- Step 2: Resolve metric libraries. ---
@@ -242,6 +211,54 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// validateCredentials checks that PgpilotMonitor has a usable credentials
+// source — either inline username+password or a referenced Secret that
+// exists in the same namespace. CRD CEL validation already enforces
+// "exactly one of the two is set", so the `default` branch is defensive.
+// Returns ok=true to tell the caller "keep reconciling"; ok=false means
+// this reconcile loop should return early with the returned Result.
+func (r *PgpilotMonitorReconciler) validateCredentials(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+	db := monitor.Spec.Database
+
+	switch {
+	case db.Username != "" && db.Password != "":
+		r.setCondition(monitor, "DatabaseReachable", metav1.ConditionTrue, "InlineCredentials",
+			"Inline username/password configured")
+		return ctrl.Result{}, true, nil
+
+	case db.CredentialsSecret != nil:
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Name: db.CredentialsSecret.Name, Namespace: monitor.Namespace}, &secret); err != nil {
+			log.Error(err, "credentials secret not found", "secret", db.CredentialsSecret.Name)
+			r.setCondition(monitor, "Ready", metav1.ConditionFalse, "SecretNotFound",
+				fmt.Sprintf("Secret %q not found: %v", db.CredentialsSecret.Name, err))
+			r.setCondition(monitor, "DatabaseReachable", metav1.ConditionFalse, "SecretNotFound",
+				fmt.Sprintf("Credentials secret %q not found", db.CredentialsSecret.Name))
+			r.Recorder.Eventf(monitor, corev1.EventTypeWarning, "SecretNotFound",
+				"Credentials secret %q not found in namespace %q", db.CredentialsSecret.Name, monitor.Namespace)
+			if statusErr := r.patchStatus(ctx, monitor); statusErr != nil {
+				log.Error(statusErr, "failed to update status")
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, false, nil
+		}
+		r.setCondition(monitor, "DatabaseReachable", metav1.ConditionTrue, "CredentialsFound",
+			fmt.Sprintf("Credentials secret %q exists", db.CredentialsSecret.Name))
+		return ctrl.Result{}, true, nil
+
+	default:
+		r.setCondition(monitor, "Ready", metav1.ConditionFalse, "NoCredentials",
+			"spec.database has no inline username/password and no credentialsSecret")
+		if statusErr := r.patchStatus(ctx, monitor); statusErr != nil {
+			log.Error(statusErr, "failed to update status")
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, false, nil
+	}
 }
 
 func (r *PgpilotMonitorReconciler) resolveLibraries(
