@@ -30,7 +30,7 @@ teardown() {
 # ---------------------------------------------------------------------------
 info "Starting PostgreSQL containers..."
 docker compose -f "$SCRIPT_DIR/docker-compose.yaml" up -d --wait
-ok "PostgreSQL primary (:15432) and secondary (:15433) are ready"
+ok "PostgreSQL primary (:15432), secondary (:15433), tertiary (:15434) are ready"
 
 # ---------------------------------------------------------------------------
 # 2. Verify connectivity (retry — init scripts may still be running)
@@ -56,6 +56,10 @@ ok "primary: pgwatch connected, users table has data"
 wait_for_psql 15433 app_secondary "secondary"
 PGPASSWORD=pgwatch_secret psql -h 127.0.0.1 -p 15433 -U pgwatch -d app_secondary -c "SELECT count(*) FROM payments;" -t -q | tr -d ' '
 ok "secondary: pgwatch connected, payments table has data"
+
+wait_for_psql 15434 app_tertiary "tertiary"
+PGPASSWORD=pgwatch_secret psql -h 127.0.0.1 -p 15434 -U pgwatch -d app_tertiary -c "SELECT count(*) FROM events;" -t -q | tr -d ' '
+ok "tertiary: pgwatch connected, events table has data"
 
 # ---------------------------------------------------------------------------
 # 3. Create Kubernetes resources
@@ -102,6 +106,42 @@ spec:
           FROM orders
           WHERE status = 'pending'
             AND created_at < now() - interval '10 min'
+      gauges: ["*"]
+EOF
+
+info "Creating PgpilotMetricLibrary for tertiary (analytics)..."
+cat <<EOF | kubectl apply -f -
+apiVersion: pgpilot.io/v1
+kind: PgpilotMetricLibrary
+metadata:
+  name: tertiary-metrics
+  namespace: ${NS}
+spec:
+  metrics:
+    - name: events_by_type
+      description: "Event counts by type in the last 5 minutes"
+      interval: 30s
+      sqls:
+        "13": |
+          SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
+                 event_type AS tag_event_type,
+                 count(*) AS count
+          FROM events
+          WHERE occurred_at > now() - interval '5 min'
+          GROUP BY event_type
+      gauges: ["*"]
+    - name: pending_reports
+      description: "Reports stuck in pending/running over 5 minutes"
+      interval: 60s
+      sqls:
+        "13": |
+          SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
+                 count(*) FILTER (WHERE status = 'pending') AS pending,
+                 count(*) FILTER (WHERE status = 'running') AS running,
+                 coalesce(max(extract(epoch from now() - computed_at))::int, 0) AS max_age_sec
+          FROM reports
+          WHERE status IN ('pending', 'running')
+            AND computed_at < now() - interval '5 min'
       gauges: ["*"]
 EOF
 
@@ -193,12 +233,61 @@ spec:
       prometheus.io/path: "/metrics"
 EOF
 
+info "Creating PgpilotMonitor for tertiary DB..."
+cat <<EOF | kubectl apply -f -
+apiVersion: pgpilot.io/v1
+kind: PgpilotMonitor
+metadata:
+  name: tertiary-db
+  namespace: ${NS}
+spec:
+  database:
+    host: "${HOST_IP}"
+    port: 15434
+    database: app_tertiary
+    sslmode: disable
+    credentialsSecret:
+      name: pgwatch-creds
+    customTags:
+      env: test
+      instance: tertiary
+  metrics:
+    preset: exhaustive
+    fromLibraries:
+      - name: tertiary-metrics
+    custom:
+      - name: tertiary_tenant_count
+        description: "Total active tenants (inline custom metric)"
+        interval: 60s
+        sqls:
+          "13": |
+            SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
+                   count(*) AS tenants
+            FROM tenants
+        gauges: ["*"]
+  sinks:
+    prometheus:
+      enabled: true
+      port: 9187
+  image:
+    repository: cybertecpostgresql/pgwatch
+    tag: "5.1.0"
+  podMetadata:
+    labels:
+      team: test
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
+      prometheus.io/path: "/metrics"
+EOF
+
 # ---------------------------------------------------------------------------
 # 4. Wait for monitors
 # ---------------------------------------------------------------------------
 info "Waiting for pgwatch pods to be ready..."
 kubectl wait --for=condition=Available deployment/pgpilot-primary-db -n "$NS" --timeout=90s
 kubectl wait --for=condition=Available deployment/pgpilot-secondary-db -n "$NS" --timeout=90s
+kubectl wait --for=condition=Available deployment/pgpilot-tertiary-db -n "$NS" --timeout=90s
 
 echo ""
 ok "Test environment ready!"
@@ -206,12 +295,14 @@ echo ""
 echo "  Namespace:     ${NS}"
 echo "  Primary DB:    ${HOST_IP}:15432/app_primary"
 echo "  Secondary DB:  ${HOST_IP}:15433/app_secondary"
+echo "  Tertiary DB:   ${HOST_IP}:15434/app_tertiary"
 echo ""
 kubectl get pm -n "$NS"
 echo ""
 echo "Useful commands:"
 echo "  kubectl logs -n ${NS} -l pgpilot.io/monitor=primary-db -f"
 echo "  kubectl logs -n ${NS} -l pgpilot.io/monitor=secondary-db -f"
+echo "  kubectl logs -n ${NS} -l pgpilot.io/monitor=tertiary-db -f"
 echo "  kubectl port-forward -n ${NS} svc/pgpilot-primary-db 9187:9187"
 echo "  curl http://localhost:9187/metrics | head"
 echo ""
