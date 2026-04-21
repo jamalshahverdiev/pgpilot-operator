@@ -1,4 +1,4 @@
-module github.com/jamalshahverdiyev/pgpilot-operator
+module github.com/jamalshahverdiev/pgpilot-operator
 
 go 1.25.7
 

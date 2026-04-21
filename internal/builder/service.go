@@ -5,7 +5,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
 
 // BuildService creates the ClusterIP Service that exposes the pgwatch

@@ -3,7 +3,7 @@ package builder
 import (
 	"strconv"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
 
 // MergedMetrics is the result of resolving all metric sources for a single

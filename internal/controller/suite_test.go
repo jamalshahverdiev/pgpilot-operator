@@ -34,7 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 	// +kubebuilder:scaffold:imports
 )
 

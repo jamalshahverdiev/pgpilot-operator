@@ -37,9 +37,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
-	"github.com/jamalshahverdiyev/pgpilot-operator/internal/builder"
-	"github.com/jamalshahverdiyev/pgpilot-operator/internal/controller"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
+	"github.com/jamalshahverdiev/pgpilot-operator/internal/builder"
+	"github.com/jamalshahverdiev/pgpilot-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

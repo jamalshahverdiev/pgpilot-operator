@@ -30,7 +30,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/jamalshahverdiyev/pgpilot-operator/test/utils"
+	"github.com/jamalshahverdiev/pgpilot-operator/test/utils"
 )
 
 // namespace where the project is deployed in
