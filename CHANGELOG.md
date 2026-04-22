@@ -35,5 +35,5 @@ Initial release of pgpilot-operator.
 - Hardened security: non-root, read-only root FS, drop ALL capabilities, least-privilege RBAC
 - Helm chart with toggles for CRDs, leader election, RBAC, ServiceMonitor
 - GitHub Actions CI: lint (Go + Helm), unit tests, envtest, e2e (kind)
-- Release pipeline: goreleaser, Docker image (ghcr.io), Helm OCI push
+- Release artifacts: Docker image (Docker Hub) + Helm OCI chart, published manually via `make docker-push` + `helm push`
 - Documentation: quickstart, CRD reference, architecture, observability, troubleshooting
