@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
 
 // PgpilotMetricLibraryReconciler reconciles a PgpilotMetricLibrary object.

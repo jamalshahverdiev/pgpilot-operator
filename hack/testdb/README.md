@@ -1,8 +1,8 @@
 # Test Database Environment
 
 Local development and smoke-testing environment for pgpilot-operator. Brings up
-two PostgreSQL instances with realistic schemas and workload generators, then
-wires PgpilotMonitor CRs pointing at them.
+three PostgreSQL instances with distinct realistic schemas and workload
+generators, then wires PgpilotMonitor CRs pointing at them.
 
 > **⚠ SECURITY WARNING**
 >
@@ -26,12 +26,14 @@ wires PgpilotMonitor CRs pointing at them.
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yaml` | Two PostgreSQL 16 containers (`primary`, `secondary`) plus two `workload-*` containers that run continuous psql loops |
+| `docker-compose.yaml` | Three PostgreSQL 16 containers (`primary`, `secondary`, `tertiary`) plus matching `workload-*` containers that run continuous psql loops |
 | `init/primary.sql` | Schema + seed data for `app_primary` (10k users, 100k orders) |
 | `init/secondary.sql` | Schema + seed data for `app_secondary` (500 merchants, 50k payments) |
+| `init/tertiary.sql` | Schema + seed data for `app_tertiary` (500 tenants, 80k events, 10k reports) |
 | `init/workload-primary.sh` | Continuous INSERT/UPDATE/DELETE + slow joins against `app_primary` |
 | `init/workload-secondary.sh` | Continuous activity against `app_secondary` |
-| `setup.sh` | Orchestrates: `docker compose up` → create K8s namespace, Secret, PgpilotMetricLibrary, PgpilotMonitors |
+| `init/workload-tertiary.sh` | Continuous analytics workload against `app_tertiary` |
+| `setup.sh` | Orchestrates: `docker compose up` → create K8s namespace, Secret, PgpilotMetricLibraries, PgpilotMonitors |
 
 ## Usage
 
@@ -52,10 +54,11 @@ when running on a differently-named interface.
 The schemas are crafted to produce the kinds of issues that show up in a real
 fleet:
 
-- **Missing indexes** — `orders.user_id`, `payments.user_id` have no index;
-  joins cause `seq_scan` on these tables
+- **Missing indexes** — `orders.user_id`, `payments.user_id`, `events.tenant_id`
+  have no index; joins cause `seq_scan` on these tables
 - **Unused indexes** — `idx_orders_note_unused`, `idx_users_email_unused`,
-  `idx_payments_description_unused` are never read by any query
+  `idx_payments_description_unused`, `idx_events_trace_id_unused` are never
+  read by any query
 - **Bloat churn** — the workload scripts `UPDATE` and `DELETE` without
   `VACUUM`, so `approx_bloat_percentage` and `n_dead_tup` accumulate
 - **Slow analytical queries** — the workload runs `GROUP BY` over the full

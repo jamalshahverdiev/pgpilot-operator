@@ -45,6 +45,29 @@ services:
       timeout: 3s
       retries: 10
 
+  postgres-tertiary:
+    image: postgres:16-alpine
+    container_name: pgpilot-testdb-tertiary
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    ports:
+      - "15434:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init/tertiary.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - pgdata-tertiary:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   workload-primary:
     image: postgres:16-alpine
     container_name: pgpilot-testdb-workload-primary
@@ -73,6 +96,21 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - ./init/workload-secondary.sh:/workload.sh:ro
+    entrypoint: ["/bin/sh", "/workload.sh"]
+
+  workload-tertiary:
+    image: postgres:16-alpine
+    container_name: pgpilot-testdb-workload-tertiary
+    depends_on:
+      postgres-tertiary:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: postgres-tertiary
+      TARGET_DB: app_tertiary
+      TARGET_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init/workload-tertiary.sh:/workload.sh:ro
     entrypoint: ["/bin/sh", "/workload.sh"]
 
   # --- Stress scenarios (opt-in via `--profile stress`) ---------------------
@@ -150,3 +188,4 @@ services:
 volumes:
   pgdata-primary:
   pgdata-secondary:
+  pgdata-tertiary:

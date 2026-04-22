@@ -34,7 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -89,7 +89,7 @@ var _ = BeforeSuite(func() {
 	err = (&PgpilotMonitorReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("pgpilot-monitor-test"),
+		Recorder: mgr.GetEventRecorderFor("pgpilot-monitor-test"), //nolint:staticcheck // SA1019
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

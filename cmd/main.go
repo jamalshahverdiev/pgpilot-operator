@@ -37,9 +37,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
-	"github.com/jamalshahverdiyev/pgpilot-operator/internal/builder"
-	"github.com/jamalshahverdiyev/pgpilot-operator/internal/controller"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
+	"github.com/jamalshahverdiev/pgpilot-operator/internal/builder"
+	"github.com/jamalshahverdiev/pgpilot-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -195,7 +195,7 @@ func main() {
 	if err := (&controller.PgpilotMonitorReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
-		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"),
+		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"), //nolint:staticcheck // SA1019
 		ServiceMonitorEnabled: serviceMonitorEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PgpilotMonitor")

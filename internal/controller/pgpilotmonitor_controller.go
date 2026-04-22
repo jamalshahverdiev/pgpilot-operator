@@ -38,8 +38,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	pgpilotv1 "github.com/jamalshahverdiyev/pgpilot-operator/api/v1"
-	"github.com/jamalshahverdiyev/pgpilot-operator/internal/builder"
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
+	"github.com/jamalshahverdiev/pgpilot-operator/internal/builder"
 )
 
 const (

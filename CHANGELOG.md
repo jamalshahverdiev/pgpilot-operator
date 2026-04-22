@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.1
+
+Testbed enhancements — no operator code changes.
+
+- Added third test database (`app_tertiary` on `:15434`) with analytics schema
+  (tenants, events, reports), FK-missing joins, unused indexes and HOT-update
+  churn to exercise a domain distinct from primary (users/orders) and secondary
+  (payments/merchants)
+- `hack/testdb/init/tertiary.sql`, `init/workload-tertiary.sh`,
+  `docker-compose.yaml` service entries, and `setup.sh` heredocs for
+  `PgpilotMetricLibrary/tertiary-metrics` + `PgpilotMonitor/tertiary-db` so a
+  single `setup.sh` run brings up all three monitors
+- Demonstrates zero-config extensibility: adding the third monitor required no
+  changes to the operator, Grafana dashboard JSON, or Prometheus scrape config
+
 ## v1.0.0
 
 Initial release of pgpilot-operator.
