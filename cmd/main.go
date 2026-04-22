@@ -195,7 +195,7 @@ func main() {
 	if err := (&controller.PgpilotMonitorReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
-		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"),
+		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"), //nolint:staticcheck // SA1019
 		ServiceMonitorEnabled: serviceMonitorEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PgpilotMonitor")

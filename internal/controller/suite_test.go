@@ -89,7 +89,7 @@ var _ = BeforeSuite(func() {
 	err = (&PgpilotMonitorReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("pgpilot-monitor-test"),
+		Recorder: mgr.GetEventRecorderFor("pgpilot-monitor-test"), //nolint:staticcheck // SA1019
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
