@@ -36,8 +36,10 @@ type MetricDefinition struct {
 	// +optional
 	Description string `json:"description,omitempty"`
 
-	// interval is the collection period (e.g. "60s", "5m"). If omitted,
-	// pgwatch defaults apply.
+	// interval is the collection period as a Go duration (e.g. "30s", "5m",
+	// "1h"). pgwatch schedules in whole seconds, so fractions are truncated;
+	// the minimum is 1s. If omitted, the operator uses 60s.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="interval must be a duration of at least 1s, e.g. 30s, 5m or 1h"
 	// +optional
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
