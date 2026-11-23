@@ -16,6 +16,18 @@ const (
 	configVolumeName = "pgwatch-config"
 	configMountPath  = "/etc/pgwatch"
 	containerName    = "pgwatch"
+
+	// webDisableArg turns off pgwatch's built-in web UI and REST API, which
+	// otherwise listen on 0.0.0.0:8080 in every collector pod without
+	// authentication. Its /test-connect endpoint opens a connection to a
+	// caller-supplied address using the PGUSER/PGPASSWORD of the pod, so any
+	// workload able to reach the pod could read the monitored database's
+	// credentials. Nothing in the operator needs that server: probes and
+	// scraping use the Prometheus sink port.
+	//
+	// The value must stay attached with "=": pgwatch declares the flag with an
+	// optional value, so a separate "all" argument would not be consumed.
+	webDisableArg = "--web-disable=all"
 )
 
 // BuildDeployment creates the Deployment that runs the pgwatch collector.
@@ -128,6 +140,7 @@ func BuildDeployment(
 func buildArgs(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) []string {
 	args := []string{
 		"--sources", configMountPath + "/" + SourcesKey,
+		webDisableArg,
 	}
 
 	if merged.Preset != "" || len(merged.Definitions) > 0 {

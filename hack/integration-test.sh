@@ -123,6 +123,15 @@ else
   fail "Unexpected image: $IMG"
 fi
 
+# pgwatch's unauthenticated web UI / REST API must be off: it can be used to
+# read the database credentials of the pod.
+ARGS=$(kubectl get deployment pgpilot-test-db -n "$TEST_NS" -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || echo "")
+if [[ "$ARGS" == *'"--web-disable=all"'* ]]; then
+  ok "pgwatch web server disabled (--web-disable=all)"
+else
+  fail "pgwatch started without --web-disable=all: $ARGS"
+fi
+
 HASH=$(kubectl get deployment pgpilot-test-db -n "$TEST_NS" -o jsonpath='{.spec.template.metadata.annotations.pgpilot\.io/config-hash}' 2>/dev/null || echo "")
 if [[ -n "$HASH" && ${#HASH} -ge 20 ]]; then
   ok "config-hash annotation present (${HASH:0:12}...)"

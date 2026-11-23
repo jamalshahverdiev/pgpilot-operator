@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 	"github.com/jamalshahverdiev/pgpilot-operator/internal/builder"
@@ -98,6 +99,61 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 	})
 
 	Context("with valid Secret", func() {
+		const webDisableArg = "--web-disable=all"
+
+		pgwatchArgs := func(g Gomega) (*appsv1.Deployment, []string) {
+			var dep appsv1.Deployment
+			g.Expect(k8sClient.Get(context.TODO(),
+				types.NamespacedName{Name: "pgpilot-test-db", Namespace: ns.Name}, &dep)).To(Succeed())
+			g.Expect(dep.Spec.Template.Spec.Containers).To(HaveLen(1))
+			return &dep, dep.Spec.Template.Spec.Containers[0].Args
+		}
+
+		It("should start pgwatch with its web server disabled", func() {
+			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				_, args := pgwatchArgs(g)
+				g.Expect(args).To(ContainElement(webDisableArg))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		// Deployments created by an operator release that did not pass the
+		// flag must be corrected in place, which is what rolls the collector
+		// pods when the operator is upgraded.
+		It("should add the web server flag to an existing Deployment that lacks it", func() {
+			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+
+			var legacy *appsv1.Deployment
+			Eventually(func(g Gomega) {
+				dep, args := pgwatchArgs(g)
+				g.Expect(args).To(ContainElement(webDisableArg))
+				legacy = dep.DeepCopy()
+			}, timeout, interval).Should(Succeed())
+
+			// Put the Deployment back into the shape the previous release
+			// left it in, using the operator's own field manager.
+			legacy.TypeMeta = metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"}
+			legacy.ManagedFields = nil
+			legacy.ResourceVersion = ""
+			legacy.Status = appsv1.DeploymentStatus{}
+			container := &legacy.Spec.Template.Spec.Containers[0]
+			container.Args = slices.DeleteFunc(container.Args, func(a string) bool { return a == webDisableArg })
+			Expect(container.Args).NotTo(ContainElement(webDisableArg))
+
+			//nolint:staticcheck // SA1019: same apply call the reconciler uses
+			Expect(k8sClient.Patch(context.TODO(), legacy, client.Apply,
+				client.FieldOwner("pgpilot-operator"), client.ForceOwnership)).To(Succeed())
+			legacyGeneration := legacy.Generation
+
+			Eventually(func(g Gomega) {
+				dep, args := pgwatchArgs(g)
+				g.Expect(args).To(ContainElement(webDisableArg))
+				g.Expect(dep.Generation).To(BeNumerically(">", legacyGeneration),
+					"the pod template must change so the collector pod is replaced")
+			}, timeout, interval).Should(Succeed())
+		})
+
 		It("should create ConfigMap, Deployment, and Service", func() {
 			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
 
