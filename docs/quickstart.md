@@ -13,6 +13,7 @@ This guide walks you through monitoring a local PostgreSQL instance with pgpilot
 
 ```bash
 helm install pgpilot-operator oci://registry-1.docker.io/jamalshahverdiev/pgpilot-operator \
+  --version 0.1.2 \
   --namespace pgpilot-system --create-namespace
 ```
 
@@ -162,4 +163,12 @@ kubectl delete -f monitor.yaml
 kubectl delete -f library.yaml
 kubectl delete namespace demo
 helm uninstall pgpilot-operator -n pgpilot-system
+```
+
+`helm uninstall` leaves the `pgpilot.io` CRDs in place on purpose: deleting them
+would delete every PgpilotMonitor and PgpilotMetricLibrary in the cluster. Remove
+them explicitly once nothing depends on them:
+
+```bash
+kubectl delete crd pgpilotmonitors.pgpilot.io pgpilotmetriclibraries.pgpilot.io
 ```

@@ -44,6 +44,17 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@$(MAKE) --no-print-directory sync-chart-crds
+
+# The Helm chart ships its own copy of the CRDs. It is never edited by hand:
+# this target replaces it with the generated ones so the two cannot drift.
+CHART_CRD_DIR ?= charts/pgpilot-operator/files/crds
+
+.PHONY: sync-chart-crds
+sync-chart-crds: ## Copy the generated CRDs into the Helm chart.
+	@mkdir -p "$(CHART_CRD_DIR)"
+	@rm -f "$(CHART_CRD_DIR)"/*.yaml
+	cp config/crd/bases/*.yaml "$(CHART_CRD_DIR)/"
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
