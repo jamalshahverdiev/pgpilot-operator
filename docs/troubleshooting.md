@@ -99,7 +99,9 @@ kubectl logs -n pgpilot-system -l control-plane=controller-manager
 Common issues:
 - RBAC misconfigured (check ClusterRole and ClusterRoleBinding)
 - Leader election conflict (another instance holds the lease)
-- CRDs not installed (`installCRDs: false` in Helm values but no manual CRD install)
+- CRDs not installed (`installCRDs: false` in Helm values but no manual CRD install —
+  apply them with
+  `kubectl apply --server-side --force-conflicts -f charts/pgpilot-operator/files/crds/`)
 
 ## Events
 

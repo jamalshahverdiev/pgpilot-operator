@@ -16,8 +16,22 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The chart tests under test/chart render the Helm chart.
+      - uses: azure/setup-helm@v4
+
       - name: Run tests
         run: make test
+
+      # `make test` regenerates CRDs, RBAC, deepcopy code and the chart's CRD
+      # copy. Anything it changes or creates was committed stale or not at all.
+      - name: Check generated files are up to date
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff
+            echo "::error::generated files are out of date; run 'make manifests generate fmt' and commit the result"
+            exit 1
+          fi
 
       - name: Upload coverage
         if: always()

@@ -20,6 +20,11 @@ rbac:
 leaderElection:
   enabled: true
 
+# Install and upgrade the pgpilot.io CRDs as part of this release. They carry
+# `helm.sh/resource-policy: keep`, so `helm uninstall` never deletes them (and
+# with them every PgpilotMonitor in the cluster). Set to false to manage the
+# CRDs yourself:
+#   kubectl apply --server-side --force-conflicts -f charts/pgpilot-operator/files/crds/
 installCRDs: true
 
 resources:

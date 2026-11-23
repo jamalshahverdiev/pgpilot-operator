@@ -26,6 +26,7 @@ Kubernetes operator for declarative PostgreSQL monitoring via [pgwatch](https://
 
 ```bash
 helm install pgpilot-operator oci://registry-1.docker.io/jamalshahverdiev/pgpilot-operator \
+  --version 0.1.2 \
   --namespace pgpilot-system --create-namespace
 ```
 

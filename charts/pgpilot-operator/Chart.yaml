@@ -2,8 +2,8 @@ apiVersion: v2
 name: pgpilot-operator
 description: Kubernetes operator for declarative PostgreSQL monitoring via pgwatch
 type: application
-version: 0.1.1
-appVersion: "1.0.1"
+version: 0.1.2
+appVersion: "v1.0.2"
 kubeVersion: ">=1.28.0-0"
 home: https://github.com/jamalshahverdiev/pgpilot-operator
 sources:

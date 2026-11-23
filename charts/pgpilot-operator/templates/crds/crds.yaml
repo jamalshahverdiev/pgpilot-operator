@@ -1,6 +1,19 @@
+{{- /*
+CRDs are rendered as regular release resources instead of living in Helm's
+special crds/ directory, so that `helm upgrade` keeps them current and
+`installCRDs=false` really skips them. The files under files/crds are copies of
+config/crd/bases produced by `make manifests` — do not edit them by hand.
+
+`helm.sh/resource-policy: keep` stops `helm uninstall` (or flipping
+installCRDs to false) from deleting the CRDs, which would cascade to every
+PgpilotMonitor and PgpilotMetricLibrary in the cluster.
+*/ -}}
 {{- if .Values.installCRDs }}
-{{- range $path, $_ := .Files.Glob "crds/*.yaml" }}
-{{ $.Files.Get $path }}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+{{- $crd := $.Files.Get $path | fromYaml }}
+{{- $annotations := merge (dict "helm.sh/resource-policy" "keep") (default (dict) $crd.metadata.annotations) }}
+{{- $_ := set $crd.metadata "annotations" $annotations }}
 ---
+{{ toYaml $crd }}
 {{- end }}
 {{- end }}

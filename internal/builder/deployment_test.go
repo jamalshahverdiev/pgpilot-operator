@@ -10,6 +10,8 @@ import (
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
 
+const sinkFlag = "--sink"
+
 func TestBuildDeployment_BasicShape(t *testing.T) {
 	monitor := newTestMonitor()
 	merged := MergedMetrics{Preset: "basic"}
@@ -53,7 +55,7 @@ func TestBuildDeployment_Args_PrometheusSink(t *testing.T) {
 	args := dep.Spec.Template.Spec.Containers[0].Args
 	found := false
 	for i, a := range args {
-		if a == "--sink" && i+1 < len(args) && strings.HasPrefix(args[i+1], "prometheus://") {
+		if a == sinkFlag && i+1 < len(args) && strings.HasPrefix(args[i+1], "prometheus://") {
 			found = true
 			break
 		}
@@ -61,6 +63,98 @@ func TestBuildDeployment_Args_PrometheusSink(t *testing.T) {
 	if !found {
 		t.Errorf("prometheus sink not found in args: %v", args)
 	}
+}
+
+// pgwatch's web UI / REST API must be off for every sink combination: it is
+// unauthenticated and can be used to leak the database credentials.
+func TestBuildDeployment_Args_WebServerDisabled(t *testing.T) {
+	tests := []struct {
+		name   string
+		sinks  pgpilotv1.SinksSpec
+		merged MergedMetrics
+	}{
+		{
+			name:  "prometheus sink",
+			sinks: pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 9187}},
+		},
+		{
+			name:  "prometheus sink on pgwatch's default web port",
+			sinks: pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 8080}},
+		},
+		{
+			name:  "grpc sink only",
+			sinks: pgpilotv1.SinksSpec{GRPC: &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver:9000"}},
+		},
+		{
+			name: "both sinks",
+			sinks: pgpilotv1.SinksSpec{
+				Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 9187},
+				GRPC:       &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver:9000"},
+			},
+		},
+		{
+			name:  "prometheus sink disabled",
+			sinks: pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: false}},
+		},
+		{
+			name: "no sinks",
+		},
+		{
+			name:   "preset with custom metrics",
+			sinks:  pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 9187}},
+			merged: MergedMetrics{Preset: "basic", Definitions: map[string]MetricDef{"m": {}}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			monitor := newTestMonitor()
+			monitor.Spec.Sinks = tt.sinks
+
+			args := BuildDeployment(monitor, tt.merged, "h").Spec.Template.Spec.Containers[0].Args
+
+			if got := countArg(args, "--web-disable=all"); got != 1 {
+				t.Errorf("want exactly one --web-disable=all, got %d in %v", got, args)
+			}
+			// The value has to be part of the same token; a detached "all"
+			// would be treated by pgwatch as a positional argument.
+			if slices.Contains(args, "--web-disable") || slices.Contains(args, "all") {
+				t.Errorf("--web-disable must use the single-token form, got %v", args)
+			}
+			// Nothing may re-enable or move the web server.
+			for _, a := range args {
+				if strings.HasPrefix(a, "--web-addr") || strings.HasPrefix(a, "--web-user") {
+					t.Errorf("unexpected web server argument %q in %v", a, args)
+				}
+			}
+		})
+	}
+}
+
+// The web server flag must not displace the arguments pgwatch needs.
+func TestBuildDeployment_Args_SourcesStillFirst(t *testing.T) {
+	args := BuildDeployment(newTestMonitor(), MergedMetrics{}, "h").Spec.Template.Spec.Containers[0].Args
+
+	if len(args) < 2 || args[0] != "--sources" || args[1] != "/etc/pgwatch/sources.yaml" {
+		t.Fatalf("args must start with --sources <file>, got %v", args)
+	}
+	for i, a := range args {
+		if a == sinkFlag || a == "--metrics" || a == "--sources" {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				t.Errorf("flag %q at index %d has no value in %v", a, i, args)
+			}
+		}
+	}
+}
+
+func countArg(args []string, want string) int {
+	n := 0
+	for _, a := range args {
+		if a == want {
+			n++
+		}
+	}
+	return n
 }
 
 func TestBuildDeployment_Args_GRPCSink(t *testing.T) {
@@ -75,7 +169,7 @@ func TestBuildDeployment_Args_GRPCSink(t *testing.T) {
 	args := dep.Spec.Template.Spec.Containers[0].Args
 	found := false
 	for i, a := range args {
-		if a == "--sink" && i+1 < len(args) && args[i+1] == "grpc://receiver.pgpilot:9000" {
+		if a == sinkFlag && i+1 < len(args) && args[i+1] == "grpc://receiver.pgpilot:9000" {
 			found = true
 			break
 		}
