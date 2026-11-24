@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Built with Go 1.27 (was 1.25, which no longer receives security fixes). The
+  builder and base images are pinned by digest.
+- Kubernetes libraries 0.37, controller-runtime 0.25, prometheus-operator API
+  types 0.95; `golang.org/x/net`, `x/text`, gRPC and OpenTelemetry moved to
+  versions without known vulnerabilities.
+- `make deploy` and `make build-installer` no longer rewrite
+  `config/manager/kustomization.yaml`; `make install`, `uninstall`, `deploy`
+  and `undeploy` fail when kustomize fails; `make docker-buildx` fails when the
+  build or push fails and builds for `linux/amd64` and `linux/arm64`.
+- `make test-e2e` uses a kubeconfig of its own (`bin/e2e-kubeconfig`) and
+  refuses to run against any other context, so the suite can no longer install
+  or remove anything in the cluster your kubeconfig points at. The Kind cluster
+  is deleted even when the suite fails.
+- New `make helm-validate` (renders the chart with its toggles and validates
+  the objects against the Kubernetes schemas) and `make govulncheck`.
+- CI: actions pinned by commit, least-privilege token, timeouts, no duplicate
+  runs for pull requests; the linter and all tools come from the versions
+  pinned in the Makefile; `go.mod` must be tidy; weekly vulnerability scan.
+
 ## v1.0.2
 
 Operator image `v1.0.2`, Helm chart `0.1.2`.

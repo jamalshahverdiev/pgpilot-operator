@@ -133,12 +133,59 @@ func IsCertManagerCRDsInstalled() bool {
 	return false
 }
 
+// KindClusterName returns the name of the Kind cluster the e2e suite runs
+// against: $KIND_CLUSTER, or Kind's own default.
+func KindClusterName() string {
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok && v != "" {
+		return v
+	}
+	return defaultKindCluster
+}
+
+// RequireKindCluster returns the name of the Kind cluster the e2e suite was
+// started for. It fails when $KIND_CLUSTER is not set: falling back to Kind's
+// default name would let a bare `go test -tags=e2e` run against a developer's
+// own "kind" cluster.
+func RequireKindCluster() (string, error) {
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v), nil
+	}
+	return "", fmt.Errorf(
+		"refusing to run the e2e suite: KIND_CLUSTER is not set " +
+			"(run the suite with `make test-e2e`, which creates a cluster for it)")
+}
+
+// KindContextName returns the kubeconfig context Kind creates for a cluster.
+func KindContextName(cluster string) string {
+	return "kind-" + cluster
+}
+
+// VerifyKubeContext returns an error unless currentContext is the context of
+// the given Kind cluster. The e2e suite installs and then removes CRDs, RBAC
+// and a namespace; this check keeps it from ever doing that to a cluster
+// other than the one created for it.
+func VerifyKubeContext(currentContext, cluster string) error {
+	want := KindContextName(cluster)
+	if got := strings.TrimSpace(currentContext); got != want {
+		return fmt.Errorf(
+			"refusing to run the e2e suite: current kube context is %q, want %q "+
+				"(run the suite with `make test-e2e`, which uses a kubeconfig of its own)", got, want)
+	}
+	return nil
+}
+
+// CurrentKubeContext returns the context kubectl would use right now.
+func CurrentKubeContext() (string, error) {
+	out, err := Run(exec.Command("kubectl", "config", "current-context"))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
-	cluster := defaultKindCluster
-	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
-	}
+	cluster := KindClusterName()
 	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
 	kindBinary := defaultKindBinary
 	if v, ok := os.LookupEnv("KIND"); ok {

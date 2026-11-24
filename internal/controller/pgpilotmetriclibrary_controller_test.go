@@ -37,17 +37,13 @@ var _ = Describe("PgpilotMetricLibrary Controller", func() {
 
 	BeforeEach(func() {
 		ns = &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "test-lib-ns-",
-			},
+			GenerateName: "test-lib-ns-",
 		}
 		Expect(k8sClient.Create(context.TODO(), ns)).To(Succeed())
 
 		lib = &pgpilotv1.PgpilotMetricLibrary{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-lib",
-				Namespace: ns.Name,
-			},
+			Name:      "test-lib",
+			Namespace: ns.Name,
 			Spec: pgpilotv1.PgpilotMetricLibrarySpec{
 				Metrics: []pgpilotv1.MetricDefinition{
 					{

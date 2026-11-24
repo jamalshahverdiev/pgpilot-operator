@@ -2,30 +2,56 @@ name: Lint
 
 on:
   push:
-    branches: [main, "*.*.x"]
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   go-lint:
     name: Go lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
 
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.7.2
+      # golangci-lint is built by the Makefile, at the version pinned there and
+      # with the Go toolchain of go.mod. A prebuilt binary refuses to run when
+      # it was built with an older Go than the module targets.
+      - name: Verify linter configuration
+        run: make lint-config
+
+      - name: Run golangci-lint
+        run: make lint
 
   helm-lint:
     name: Helm lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: azure/setup-helm@v4
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
 
-      - run: helm lint charts/pgpilot-operator/ --strict
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.22.1
+
+      - name: Lint the chart
+        run: helm lint charts/pgpilot-operator/ --strict
+
+      # Renders the chart with its toggles and validates every object against
+      # the Kubernetes API schemas.
+      - name: Validate rendered manifests
+        run: make helm-validate

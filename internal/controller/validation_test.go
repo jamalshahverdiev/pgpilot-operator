@@ -24,7 +24,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,7 +38,7 @@ var _ = Describe("CRD validation", func() {
 	var ns string
 
 	BeforeEach(func() {
-		created := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "test-validation-"}}
+		created := &corev1.Namespace{GenerateName: "test-validation-"}
 		Expect(k8sClient.Create(context.TODO(), created)).To(Succeed())
 		ns = created.Name
 	})

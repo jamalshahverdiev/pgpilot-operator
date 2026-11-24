@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -39,9 +38,11 @@ var (
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
+// The default setup requires Kind. Run it with `make test-e2e`, which creates
+// the cluster and points the suite at a kubeconfig of its own.
 //
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// CertManager is only installed when CERT_MANAGER_INSTALL_SKIP is set to a
+// value other than "true"; `make test-e2e` sets it to "true".
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting pgpilot-operator e2e test suite\n")
@@ -49,9 +50,16 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	By("checking that kubectl points at the e2e Kind cluster")
+	cluster, err := utils.RequireKindCluster()
+	Expect(err).NotTo(HaveOccurred())
+	currentContext, err := utils.CurrentKubeContext()
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the current kube context")
+	Expect(utils.VerifyKubeContext(currentContext, cluster)).To(Succeed())
+
 	By("building the manager image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
+	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,

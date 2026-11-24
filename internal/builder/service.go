@@ -2,7 +2,6 @@ package builder
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
@@ -20,13 +19,11 @@ func BuildService(monitor *pgpilotv1.PgpilotMonitor) *corev1.Service {
 	svcAnnotations := MergeAnnotations(nil, monitor.Spec.ServiceMetadata.Annotations)
 
 	svc := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   monitor.Namespace,
-			Labels:      svcLabels,
-			Annotations: svcAnnotations,
-		},
+		APIVersion: "v1", Kind: "Service",
+		Name:        name,
+		Namespace:   monitor.Namespace,
+		Labels:      svcLabels,
+		Annotations: svcAnnotations,
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
@@ -35,10 +32,10 @@ func BuildService(monitor *pgpilotv1.PgpilotMonitor) *corev1.Service {
 			},
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "metrics",
+					Name:       metricsPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       port,
-					TargetPort: intstr.FromString("metrics"),
+					TargetPort: intstr.FromString(metricsPortName),
 				},
 			},
 		},

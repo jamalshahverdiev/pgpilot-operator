@@ -4,14 +4,32 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Indirect modules are included: the operator links them (grpc, x/net,
+    # OpenTelemetry via the Kubernetes libraries) and their fixes would
+    # otherwise never arrive.
+    allow:
+      - dependency-type: all
+    ignore:
+      # Later releases live at cel.dev/cel-go; under this path they cannot be
+      # fetched. The module moves with k8s.io/apiserver. Drop this entry once
+      # the Kubernetes libraries have switched import paths.
+      - dependency-name: "github.com/google/cel-go"
     groups:
+      # These move together: controller-runtime and the prometheus-operator
+      # API types are built against one Kubernetes minor.
       k8s:
         patterns:
           - "k8s.io/*"
           - "sigs.k8s.io/*"
-      otel:
+          - "github.com/prometheus-operator/*"
+      test:
         patterns:
-          - "go.opentelemetry.io/*"
+          - "github.com/onsi/*"
+      # Everything else, mostly indirect modules, in one pull request a week.
+      # A dependency lands in the first group that matches it.
+      other:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
@@ -22,3 +40,11 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # A new Go release line has to arrive in go.mod, the Dockerfile and the
+      # devcontainer together (test/build checks that they agree), so only
+      # patch releases and digest refreshes are taken automatically.
+      - dependency-name: "golang"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
