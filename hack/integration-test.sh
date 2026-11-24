@@ -62,10 +62,6 @@ spec:
     prometheus:
       enabled: true
       port: 9187
-  image:
-    repository: cybertecpostgresql/pgwatch
-    tag: "5.1.0"
-    pullPolicy: IfNotPresent
   podMetadata:
     labels:
       test-run: "true"
@@ -117,10 +113,13 @@ fi
 # ---------------------------------------------------------------------------
 info "Test 3: Deployment spec"
 IMG=$(kubectl get deployment pgpilot-test-db -n "$TEST_NS" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
-if [[ "$IMG" == "cybertecpostgresql/pgwatch:5.1.0" ]]; then
-  ok "Deployment uses default pgwatch image"
+# The monitor names no image, so this is the operator's default: the pgwatch
+# release recorded next to the embedded metric registry.
+WANT_IMG="cybertecpostgresql/pgwatch:$(cat "$(dirname "$0")/../internal/builder/pgwatchdata/VERSION")"
+if [[ "$IMG" == "$WANT_IMG" ]]; then
+  ok "Deployment uses default pgwatch image ($IMG)"
 else
-  fail "Unexpected image: $IMG"
+  fail "Unexpected image: $IMG (want $WANT_IMG)"
 fi
 
 # pgwatch's unauthenticated web UI / REST API must be off: it can be used to

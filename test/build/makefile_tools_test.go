@@ -132,6 +132,7 @@ func TestHelmValidate_DefaultSetsCoverTheChartToggles(t *testing.T) {
 		"--set metrics.enabled=false",
 		"--set metrics.secure=false",
 		"--set serviceAccount.create=false,serviceAccount.name=existing",
+		"--set migrations.storedImageTag=false",
 	} {
 		if !strings.Contains(all+"\n", toggle+"\n") {
 			t.Errorf("helm-validate does not render with %q", toggle)

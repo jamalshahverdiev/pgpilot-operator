@@ -80,6 +80,51 @@ test-cover: test ## Run tests and display coverage summary.
 test-integration: ## Run live integration test against current cluster (requires operator deployed).
 	hack/integration-test.sh
 
+# The collector tests start the real pgwatch image next to a PostgreSQL
+# container, both configured exactly as the operator would configure a pod,
+# and read the metrics it serves. They need a container runtime and pull
+# images, so they carry a build tag and are not part of `make test`.
+COLLECTOR_TEST_POSTGRES ?= postgres:18
+
+.PHONY: test-collector
+test-collector: ## Run the generated configuration against a real pgwatch container and PostgreSQL (needs docker).
+	@command -v "$(CONTAINER_TOOL)" >/dev/null 2>&1 || { echo "$(CONTAINER_TOOL) is not installed"; exit 1; }
+	COLLECTOR_TEST_RUNTIME="$(CONTAINER_TOOL)" COLLECTOR_TEST_POSTGRES="$(COLLECTOR_TEST_POSTGRES)" \
+		go test -tags=collector -count=1 -timeout 20m ./test/collector/ -v
+
+# PGWATCH_VERSION is the pgwatch release the operator is built for: the
+# default image tag of a monitor and the release the embedded copy of the
+# metric registry comes from. It is recorded next to that copy.
+PGWATCH_DATA ?= internal/builder/pgwatchdata
+PGWATCH_VERSION ?= $(shell cat $(PGWATCH_DATA)/VERSION 2>/dev/null)
+PGWATCH_SOURCE_URL ?= https://raw.githubusercontent.com/cybertec-postgresql/pgwatch
+CURL ?= curl
+
+# update-pgwatch-registry replaces the embedded registry and the licence that
+# has to accompany it with the files of another pgwatch release. Nothing is
+# touched unless both downloads succeed.
+.PHONY: update-pgwatch-registry
+# The version is handed to the shell through the environment and never pasted
+# into the recipe text: it is checked there before it is used for anything.
+update-pgwatch-registry: export PGWATCH_VERSION := $(PGWATCH_VERSION)
+update-pgwatch-registry: ## Fetch the metric registry of another pgwatch release: make update-pgwatch-registry PGWATCH_VERSION=x.y.z
+	@[[ "$$PGWATCH_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$$ ]] || { echo "PGWATCH_VERSION must be a release such as 6.2.0, got '$$PGWATCH_VERSION'"; exit 1; }
+	@work="$$(mktemp -d)" || exit 1; rc=0; \
+	{ "$(CURL)" --fail --silent --show-error --location --proto '=https' \
+		-o "$$work/metrics.yaml" "$(PGWATCH_SOURCE_URL)/v$$PGWATCH_VERSION/internal/metrics/metrics.yaml" && \
+	  "$(CURL)" --fail --silent --show-error --location --proto '=https' \
+		-o "$$work/LICENSE" "$(PGWATCH_SOURCE_URL)/v$$PGWATCH_VERSION/LICENSE" && \
+	  grep -q '^presets:' "$$work/metrics.yaml" && grep -q '^metrics:' "$$work/metrics.yaml" && \
+	  [ -s "$$work/LICENSE" ] && \
+	  printf '%s\n' "$$PGWATCH_VERSION" > "$$work/VERSION" && \
+	  ( cd "$$work" && sha256sum metrics.yaml LICENSE > SHA256SUMS ) && \
+	  cp "$$work/metrics.yaml" "$$work/LICENSE" "$$work/VERSION" "$$work/SHA256SUMS" "$(PGWATCH_DATA)/"; } || rc=$$?; \
+	[ -z "$$work" ] || rm -r -- "$$work"; \
+	[ $$rc -eq 0 ] || { echo "could not fetch pgwatch $$PGWATCH_VERSION; $(PGWATCH_DATA) is unchanged"; exit $$rc; }
+	@echo "$(PGWATCH_DATA) now holds the registry of pgwatch $$PGWATCH_VERSION."
+	@echo "Set PgwatchVersion in internal/builder/pgwatch_builtin.go to the same version, then run"
+	@echo "'make test test-collector' and review what changed in the presets."
+
 # The e2e tests assume Kind is pre-installed. They build the manager image,
 # load it into a dedicated Kind cluster and deploy the operator there.
 #
@@ -171,7 +216,8 @@ HELM_VALIDATE_SETS ?= - \
 	metrics.enabled=false \
 	metrics.secure=false \
 	serviceAccount.create=false,serviceAccount.name=existing \
-	credentials.recheckInterval=1m
+	credentials.recheckInterval=1m \
+	migrations.storedImageTag=false
 
 .PHONY: helm-validate
 helm-validate: kubeconform ## Render the Helm chart with its toggles and validate the objects against the Kubernetes API schemas.

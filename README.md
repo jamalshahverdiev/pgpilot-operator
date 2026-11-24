@@ -2,7 +2,7 @@
 
 Kubernetes operator for declarative PostgreSQL monitoring via [pgwatch](https://github.com/cybertec-postgresql/pgwatch).
 
-**pgpilot-operator** wraps pgwatch v5 in a Kubernetes-native operator so you can monitor any PostgreSQL database — including managed services like AWS RDS, Aurora, Cloud SQL, and Supabase — using CRDs, GitOps workflows, and standard Kubernetes tooling.
+**pgpilot-operator** wraps pgwatch v6 in a Kubernetes-native operator so you can monitor any PostgreSQL database — including managed services like AWS RDS, Aurora, Cloud SQL, and Supabase — using CRDs, GitOps workflows, and standard Kubernetes tooling.
 
 ## Key Features
 
@@ -19,7 +19,7 @@ Kubernetes operator for declarative PostgreSQL monitoring via [pgwatch](https://
 
 - Kubernetes >= 1.28
 - Helm >= 3.x
-- A PostgreSQL database to monitor
+- A PostgreSQL database to monitor, version 14 or newer (the oldest release pgwatch's built-in metrics cover)
 - A Secret with connection credentials
 
 ### Install via Helm
@@ -56,7 +56,7 @@ spec:
     credentialsSecret:
       name: my-db-creds
   metrics:
-    preset: exhaustive
+    preset: exhaustive_no_python
   sinks:
     prometheus:
       enabled: true
@@ -105,3 +105,9 @@ local Prometheus + Grafana stack for development and see it in action.
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) for details.
+
+The operator embeds the metric definitions of pgwatch
+(`internal/builder/pgwatchdata/metrics.yaml`), which are distributed under the
+BSD 3-Clause License, Copyright (c) 2022 CYBERTEC PostgreSQL International GmbH.
+See [internal/builder/pgwatchdata/LICENSE](internal/builder/pgwatchdata/LICENSE);
+both licences are also in the operator image under `/licenses`.

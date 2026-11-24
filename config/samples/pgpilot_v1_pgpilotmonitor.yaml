@@ -19,7 +19,9 @@ spec:
       team: users
 
   metrics:
-    preset: exhaustive
+    # "exhaustive" adds cpu_load, which needs a PL/Python helper function in
+    # the monitored database.
+    preset: exhaustive_no_python
     fromLibraries:
       - name: business-metrics
     custom:

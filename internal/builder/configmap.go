@@ -34,6 +34,13 @@ func BuildConfigMap(
 	monitor *pgpilotv1.PgpilotMonitor,
 	merged MergedMetrics,
 ) (*corev1.ConfigMap, string, error) {
+	// Checked here, for every combination of preset and custom metrics: a
+	// preset the collector cannot resolve makes it run and collect nothing,
+	// which looks healthy from the outside.
+	if err := ValidatePreset(merged.Preset); err != nil {
+		return nil, "", err
+	}
+
 	sourcesYAML, err := renderSources(monitor, merged)
 	if err != nil {
 		return nil, "", fmt.Errorf("render sources.yaml: %w", err)

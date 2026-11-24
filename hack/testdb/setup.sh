@@ -185,9 +185,6 @@ spec:
     prometheus:
       enabled: true
       port: 9187
-  image:
-    repository: cybertecpostgresql/pgwatch
-    tag: "5.1.0"
   podMetadata:
     labels:
       team: test
@@ -221,9 +218,6 @@ spec:
     prometheus:
       enabled: true
       port: 9187
-  image:
-    repository: cybertecpostgresql/pgwatch
-    tag: "5.1.0"
   podMetadata:
     labels:
       team: test
@@ -269,9 +263,6 @@ spec:
     prometheus:
       enabled: true
       port: 9187
-  image:
-    repository: cybertecpostgresql/pgwatch
-    tag: "5.1.0"
   podMetadata:
     labels:
       team: test

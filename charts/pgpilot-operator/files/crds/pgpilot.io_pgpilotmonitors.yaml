@@ -203,12 +203,16 @@ spec:
                     - Never
                     type: string
                   repository:
-                    default: cybertecpostgresql/pgwatch
-                    description: repository of the pgwatch image.
+                    description: |-
+                      repository of the pgwatch image. Leave empty for the operator's
+                      default, cybertecpostgresql/pgwatch.
                     type: string
                   tag:
-                    default: 5.1.0
-                    description: tag of the pgwatch image.
+                    description: |-
+                      tag of the pgwatch image. Leave empty to run the pgwatch release this
+                      operator version is built for; that is the recommended setting, since
+                      the metric definitions the operator hands to the collector come from
+                      that release. A tag set here is kept across operator upgrades.
                     type: string
                 type: object
               metrics:
@@ -297,9 +301,12 @@ spec:
                           description: |-
                             statementTimeoutSeconds is accepted for compatibility and ignored.
 
-                            Deprecated: pgwatch has no per-metric statement timeout, so the value
-                            was never applied. Limit query time on the database side instead,
-                            e.g. `ALTER ROLE <monitoring role> SET statement_timeout = '5s'`.
+                            Deprecated: pgwatch has no configurable per-metric timeout, so the
+                            value was never applied. From pgwatch 6 on the collector cancels
+                            metric queries on its own: those due together after 30 seconds, and
+                            one retried alone after its interval (at least 30 seconds). For a
+                            limit of your choosing set it on the database side, e.g.
+                            `ALTER ROLE <monitoring role> SET statement_timeout = '5s'`.
                           format: int32
                           minimum: 0
                           type: integer
@@ -346,6 +353,10 @@ spec:
                       preset is the name of a pgwatch built-in preset (e.g. "basic",
                       "standard", "exhaustive", "recommendations", "rds", "aurora").
                       Leave empty to rely entirely on libraries and custom metrics.
+                      A name pgwatch does not know, or one of its presets for sources
+                      other than PostgreSQL ("patroni", "pgbouncer", "pgpool"), is
+                      reported in the monitor's status and no collector configuration is
+                      generated for it.
                     maxLength: 63
                     pattern: ^([a-z][a-z0-9_]*)?$
                     type: string

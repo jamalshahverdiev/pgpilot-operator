@@ -42,6 +42,12 @@ spec:
             {{- with .Values.credentials.recheckInterval }}
             - --credentials-recheck-interval={{ . }}
             {{- end }}
+            {{- $storedImageTag := toString (dig "storedImageTag" true (.Values.migrations | default dict)) }}
+            {{- if eq $storedImageTag "false" }}
+            - --migrate-stored-image-tag=false
+            {{- else if ne $storedImageTag "true" }}
+            {{- fail (printf "migrations.storedImageTag must be true or false, got %q" $storedImageTag) }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:8443
             {{- else }}

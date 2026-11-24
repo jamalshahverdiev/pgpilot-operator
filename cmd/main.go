@@ -68,6 +68,7 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var credentialsRecheck time.Duration
+	var migrateStoredImageTag bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -87,6 +88,11 @@ func main() {
 		"How often a credentials Secret referenced by a PgpilotMonitor is read again. "+
 			"A changed Secret rolls the collector pod, so this bounds how long a rotated password goes unnoticed. "+
 			"At least 10s; 0 means the default of 5m.")
+	flag.BoolVar(&migrateStoredImageTag, "migrate-stored-image-tag", true,
+		"Remove, once at start, the pgwatch image tag that operator releases up to v1.0.2 wrote into the spec "+
+			"of the monitors they reconciled, so that those monitors run the pgwatch release of this operator. "+
+			"A tag written by anything else is left alone, and so is a monitor annotated "+
+			"pgpilot.io/keep-image-tag=true. Set to false to leave every stored tag as it is.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
@@ -181,6 +187,7 @@ func main() {
 	controllerOptions := controller.Options{
 		ServiceMonitorEnabled: serviceMonitorEnabled,
 		CredentialsRecheck:    credentialsRecheck,
+		KeepStoredImageTag:    !migrateStoredImageTag,
 	}
 	if err := controllerOptions.Validate(); err != nil {
 		setupLog.Error(err, "invalid command line")

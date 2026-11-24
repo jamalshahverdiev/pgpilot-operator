@@ -24,6 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,6 +41,11 @@ type Options struct {
 	// PgpilotMonitorReconciler; zero means the default.
 	CredentialsRecheck time.Duration
 	CredentialsRetry   time.Duration
+
+	// KeepStoredImageTag turns off StoredImageMigration: monitors keep the
+	// pgwatch image tag an operator release up to v1.0.2 wrote into their
+	// spec.
+	KeepStoredImageTag bool
 }
 
 // MinCredentialsRecheck is the shortest recheck interval Validate accepts.
@@ -75,8 +81,13 @@ func ManagerOptions(base ctrl.Options, opts Options) ctrl.Options {
 
 // SetupWithManager registers the controllers of this package with mgr.
 func SetupWithManager(mgr ctrl.Manager, opts Options) error {
+	// Every write names the operator as its author. Without this the API
+	// server records them under the name of the binary, "manager", which
+	// every kubebuilder-based controller shares.
+	owned := client.WithFieldOwner(mgr.GetClient(), fieldOwner)
+
 	if err := (&PgpilotMonitorReconciler{
-		Client:                mgr.GetClient(),
+		Client:                owned,
 		Scheme:                mgr.GetScheme(),
 		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"), //nolint:staticcheck // SA1019
 		ServiceMonitorEnabled: opts.ServiceMonitorEnabled,
@@ -86,12 +97,38 @@ func SetupWithManager(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("set up the PgpilotMonitor controller: %w", err)
 	}
 	if err := (&PgpilotMetricLibraryReconciler{
-		Client: mgr.GetClient(),
+		Client: owned,
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the PgpilotMetricLibrary controller: %w", err)
 	}
+	if migration := storedImageMigration(mgr, mgr.GetClient(), opts); migration != nil {
+		if err := mgr.Add(migration); err != nil {
+			return fmt.Errorf("set up the stored image migration: %w", err)
+		}
+	}
 	return nil
+}
+
+// migrationSource is the part of a manager the migration is built from.
+type migrationSource interface {
+	GetAPIReader() client.Reader
+	GetEventRecorderFor(name string) record.EventRecorder
+}
+
+// storedImageMigration returns the migration the manager runs when it starts
+// leading, or nil when opts turn it off. It reads through the manager's
+// uncached reader, because the cache holds no managedFields, and writes
+// through c under the operator's own name.
+func storedImageMigration(src migrationSource, c client.Client, opts Options) *StoredImageMigration {
+	if opts.KeepStoredImageTag {
+		return nil
+	}
+	return &StoredImageMigration{
+		Reader:   src.GetAPIReader(),
+		Client:   client.WithFieldOwner(c, fieldOwner),
+		Recorder: src.GetEventRecorderFor("pgpilot-monitor"), //nolint:staticcheck // SA1019
+	}
 }
 
 // CacheOptions limits what the manager keeps in memory to the objects the

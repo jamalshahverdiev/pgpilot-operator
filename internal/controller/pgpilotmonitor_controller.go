@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -50,9 +51,19 @@ import (
 const (
 	finalizerName = "pgpilot.io/finalizer"
 
+	// fieldOwner is the name under which the operator writes to the API
+	// server, for server-side apply and for every other write.
+	fieldOwner = "pgpilot-operator"
+
 	// conditionCredentials reports whether the monitor has credentials the
 	// collector pod can start with.
 	conditionCredentials = "CredentialsAvailable"
+	// conditionConfigGenerated reports whether the collector's
+	// configuration could be rendered from the spec.
+	conditionConfigGenerated = "ConfigGenerated"
+	// reasonInvalidPreset is set when spec.metrics.preset names a preset
+	// the collector cannot gather from a PostgreSQL database.
+	reasonInvalidPreset = "InvalidPreset"
 	// legacyConditionDatabaseReachable is the name the condition above had
 	// in earlier releases. Nothing ever connected to the database to set it,
 	// so the name promised more than it checked.
@@ -115,8 +126,6 @@ func (r *PgpilotMonitorReconciler) credentialsRetry() time.Duration {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
 func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
 	var monitor pgpilotv1.PgpilotMonitor
 	if err := r.Get(ctx, req.NamespacedName, &monitor); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -150,14 +159,7 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// --- Step 2: Resolve metric libraries. ---
 	libraries, err := r.resolveLibraries(ctx, &monitor)
 	if err != nil {
-		log.Error(err, "failed to resolve metric libraries")
-		r.setCondition(&monitor, "Ready", metav1.ConditionFalse, "LibraryResolveFailed", err.Error())
-		r.Recorder.Eventf(&monitor, corev1.EventTypeWarning, "LibraryResolveFailed",
-			"Failed to resolve metric libraries: %v", err)
-		if statusErr := r.patchStatus(ctx, &monitor); statusErr != nil {
-			log.Error(statusErr, "failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.librariesUnavailable(ctx, &monitor, err), nil
 	}
 
 	// --- Step 3: Merge metrics. ---
@@ -165,6 +167,12 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// --- Step 4: Build ConfigMap. ---
 	desiredCM, configHash, err := builder.BuildConfigMap(&monitor, merged)
+	if errors.Is(err, builder.ErrInvalidPreset) {
+		// A mistake in the spec: retrying cannot fix it, and the next
+		// change of the spec starts a new reconcile anyway.
+		r.configInvalid(ctx, &monitor, reasonInvalidPreset, err.Error())
+		return ctrl.Result{}, nil
+	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build configmap: %w", err)
 	}
@@ -175,7 +183,7 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
 	}
 
-	r.setCondition(&monitor, "ConfigGenerated", metav1.ConditionTrue, "ConfigMapUpdated",
+	r.setCondition(&monitor, conditionConfigGenerated, metav1.ConditionTrue, "ConfigMapUpdated",
 		fmt.Sprintf("ConfigMap %s up to date (hash=%s)", desiredCM.Name, configHash[:12]))
 	if monitor.Status.ConfigHash != configHash {
 		r.Recorder.Eventf(&monitor, corev1.EventTypeNormal, "ConfigMapUpdated",
@@ -387,6 +395,44 @@ func (r *PgpilotMonitorReconciler) credentialsUnavailable(
 	return ctrl.Result{RequeueAfter: r.credentialsRetry()}
 }
 
+// librariesUnavailable records that a referenced metric library could not be
+// read and asks for another try.
+func (r *PgpilotMonitorReconciler) librariesUnavailable(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+	cause error,
+) ctrl.Result {
+	log := logf.FromContext(ctx)
+	log.Error(cause, "failed to resolve metric libraries")
+	r.setCondition(monitor, "Ready", metav1.ConditionFalse, "LibraryResolveFailed", cause.Error())
+	r.Recorder.Eventf(monitor, corev1.EventTypeWarning, "LibraryResolveFailed",
+		"Failed to resolve metric libraries: %v", cause)
+	if statusErr := r.patchStatus(ctx, monitor); statusErr != nil {
+		log.Error(statusErr, "failed to update status")
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}
+}
+
+// configInvalid records that no collector configuration can be generated
+// from the monitor's spec as it stands.
+func (r *PgpilotMonitorReconciler) configInvalid(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+	reason, message string,
+) {
+	r.setCondition(monitor, "Ready", metav1.ConditionFalse, reason, message)
+	r.setCondition(monitor, conditionConfigGenerated, metav1.ConditionFalse, reason, message)
+	// A collector generated from an earlier, valid spec may still be
+	// running; the monitor is nevertheless not in the state its spec asks
+	// for, and status.ready must not say otherwise.
+	monitor.Status.Ready = false
+	monitor.Status.ObservedGeneration = monitor.Generation
+	r.Recorder.Event(monitor, corev1.EventTypeWarning, reason, message)
+	if err := r.patchStatus(ctx, monitor); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to update status")
+	}
+}
+
 // credentialsVersion returns a token that changes whenever the Secret object
 // changes. The collector resolves the Secret's values into its environment
 // when it starts, so a rotated password only takes effect in a new pod; the
@@ -432,7 +478,7 @@ func (r *PgpilotMonitorReconciler) serverSideApply(ctx context.Context, obj clie
 	// still works and is what almost every operator in the wild uses.
 	// Tracked for v1.1.
 	//nolint:staticcheck // SA1019: client.Apply typed Apply migration deferred to v1.1
-	return r.Patch(ctx, obj, client.Apply, client.FieldOwner("pgpilot-operator"), client.ForceOwnership)
+	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership)
 }
 
 // patchStatus updates the PgpilotMonitor status subresource, re-fetching and
