@@ -38,7 +38,7 @@ kubectl create secret generic demo-db-creds \
   --from-literal=password=your-password
 ```
 
-The operator reads this Secret to build the pgwatch connection string. It never copies the Secret contents elsewhere.
+The operator checks that this Secret exists and has both keys, and points the pgwatch pod at it. The pod reads the values itself; the operator never copies them anywhere.
 
 ## 4. Create a PgpilotMonitor
 
@@ -100,7 +100,7 @@ kubectl describe pgpilotmonitor demo-db -n demo
 
 Expected conditions:
 
-- `DatabaseReachable: True` — credentials Secret found
+- `CredentialsAvailable: True` — the credentials Secret exists and has both keys
 - `ConfigGenerated: True` — ConfigMap with pgwatch config created
 - `Ready: True` — pgwatch pod is running (may take a few seconds)
 

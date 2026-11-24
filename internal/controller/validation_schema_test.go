@@ -46,6 +46,20 @@ func testNamespace(prefix string) string {
 	return ns.Name
 }
 
+// createForSpec creates an object and deletes it again when the spec ends.
+//
+// The manager of the suite reconciles everything that exists. A monitor left
+// behind by an earlier spec - most have no Secret, so they are retried again
+// and again - takes its share of the single reconcile worker and of the
+// client's request budget, and later specs wait behind it.
+func createForSpec(obj client.Object) {
+	GinkgoHelper()
+	Expect(k8sClient.Create(context.TODO(), obj)).To(Succeed())
+	DeferCleanup(func() {
+		_ = k8sClient.Delete(context.TODO(), obj)
+	})
+}
+
 // minimalMonitor is the smallest PgpilotMonitor the API accepts: nothing that
 // has a default is set.
 func minimalMonitor(ns, name string) *unstructured.Unstructured {
@@ -144,7 +158,7 @@ var _ = Describe("CRD validation size limits", func() {
 		func(l limit) {
 			By(fmt.Sprintf("accepting %d", l.max))
 			Expect(k8sClient.Create(context.TODO(),
-				withSpec(minimalMonitor(ns, "at-the-limit"), l.value(l.max), l.path...))).To(Succeed())
+				withSpec(minimalMonitor(ns, "at-the-limit"), l.value(l.max), l.path...), client.DryRunAll)).To(Succeed())
 
 			By(fmt.Sprintf("rejecting %d", l.max+1))
 			expectInvalid(withSpec(minimalMonitor(ns, "over-the-limit"), l.value(l.max+1), l.path...),
@@ -169,12 +183,13 @@ var _ = Describe("CRD validation size limits", func() {
 	)
 
 	It("allows a library 256 metrics and no more", func() {
-		Expect(k8sClient.Create(context.TODO(), libraryOf(ns, "full", metricsNamed(256)))).To(Succeed())
+		Expect(k8sClient.Create(context.TODO(), libraryOf(ns, "full", metricsNamed(256)), client.DryRunAll)).To(Succeed())
 		expectInvalid(libraryOf(ns, "overfull", metricsNamed(257)), "spec.metrics", "Too many")
 	})
 
 	It("allows a library metric 32 sqls entries and no more", func() {
-		Expect(k8sClient.Create(context.TODO(), libraryOf(ns, "versions", sqls(32).([]any)))).To(Succeed())
+		Expect(k8sClient.Create(context.TODO(),
+			libraryOf(ns, "versions", sqls(32).([]any)), client.DryRunAll)).To(Succeed())
 		expectInvalid(libraryOf(ns, "too-many-versions", sqls(33).([]any)), "spec.metrics[0].sqls", "Too many")
 	})
 
@@ -191,7 +206,7 @@ var _ = Describe("CRD defaults and enumerations", func() {
 
 	stored := func(obj *unstructured.Unstructured) map[string]any {
 		GinkgoHelper()
-		Expect(k8sClient.Create(context.TODO(), obj)).To(Succeed())
+		createForSpec(obj)
 		got := obj.DeepCopy()
 		Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(obj), got)).To(Succeed())
 		spec, _, _ := unstructured.NestedMap(got.Object, "spec")
@@ -285,13 +300,13 @@ var _ = Describe("CRD defaults and enumerations", func() {
 
 		zero := metricNamed("with_timeout")
 		zero["statementTimeoutSeconds"] = int64(0)
-		Expect(k8sClient.Create(context.TODO(), libraryOf(ns, "zero-timeout", []any{zero}))).To(Succeed())
+		createForSpec(libraryOf(ns, "zero-timeout", []any{zero}))
 	})
 
 	DescribeTable("accepts the edges of the port ranges",
 		func(port int64, path ...string) {
 			Expect(k8sClient.Create(context.TODO(),
-				withSpec(minimalMonitor(ns, fmt.Sprintf("port-%d", port)), port, path...))).To(Succeed())
+				withSpec(minimalMonitor(ns, fmt.Sprintf("port-%d", port)), port, path...), client.DryRunAll)).To(Succeed())
 		},
 		Entry("database port 1", int64(1), "database", "port"),
 		Entry("database port 65535", int64(65535), "database", "port"),
@@ -316,7 +331,7 @@ var _ = Describe("CRD defaults and enumerations", func() {
 		// The field is required in the schema but has a default, so leaving
 		// it out is fine; this pins that the default satisfies the schema.
 		Expect(k8sClient.Create(context.TODO(), withSpec(minimalMonitor(ns, "grpc-no-enabled"),
-			map[string]any{"endpoint": "receiver:9000"}, "sinks", "grpc"))).To(Succeed())
+			map[string]any{"endpoint": "receiver:9000"}, "sinks", "grpc"), client.DryRunAll)).To(Succeed())
 	})
 
 	It("requires a metric to have a name and SQL", func() {
@@ -398,7 +413,7 @@ var _ = Describe("CRD printer columns", func() {
 	// The column used to select `.spec.metrics[*].name` as an integer and
 	// was always empty.
 	It("shows the number of metrics of a library", func() {
-		Expect(k8sClient.Create(context.TODO(), libraryOf(ns, "three", metricsNamed(3)))).To(Succeed())
+		createForSpec(libraryOf(ns, "three", metricsNamed(3)))
 
 		Eventually(func(g Gomega) {
 			t := table("pgpilotmetriclibraries", false)
@@ -410,7 +425,7 @@ var _ = Describe("CRD printer columns", func() {
 	// With `omitempty` on status.ready the cell was empty for every monitor
 	// that was not ready.
 	It("shows READY false for a monitor that is not ready", func() {
-		Expect(k8sClient.Create(context.TODO(), minimalMonitor(ns, "waiting"))).To(Succeed())
+		createForSpec(minimalMonitor(ns, "waiting"))
 
 		Eventually(func(g Gomega) {
 			t := table("pgpilotmonitors", false)
@@ -423,7 +438,7 @@ var _ = Describe("CRD printer columns", func() {
 	})
 
 	It("adds pod, host and database with -o wide", func() {
-		Expect(k8sClient.Create(context.TODO(), minimalMonitor(ns, "wide"))).To(Succeed())
+		createForSpec(minimalMonitor(ns, "wide"))
 
 		Eventually(func(g Gomega) {
 			t := table("pgpilotmonitors", true)

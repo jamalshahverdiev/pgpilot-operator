@@ -57,3 +57,10 @@ metrics:
 
 healthProbe:
   bindAddress: ":8081"
+
+credentials:
+  # How often the Secret referenced by a PgpilotMonitor is read again. The
+  # operator does not watch Secrets; a changed Secret is noticed at the next
+  # recheck and the collector pod is then replaced. A Go duration of at least
+  # 10s, e.g. "1m". Empty uses the operator's default of 5m.
+  recheckInterval: ""

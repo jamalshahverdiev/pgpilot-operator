@@ -84,6 +84,7 @@ var _ = Describe("Shipped manifests", func() {
 			obj.SetNamespace(ns)
 			Expect(k8sClient.Create(context.TODO(), obj)).To(Succeed(),
 				"%s %q from %s must be accepted by the API server", obj.GetKind(), obj.GetName(), source)
+			DeferCleanup(func() { _ = k8sClient.Delete(context.TODO(), obj) })
 		}
 	}
 

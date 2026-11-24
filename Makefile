@@ -170,7 +170,8 @@ HELM_VALIDATE_SETS ?= - \
 	leaderElection.enabled=false \
 	metrics.enabled=false \
 	metrics.secure=false \
-	serviceAccount.create=false,serviceAccount.name=existing
+	serviceAccount.create=false,serviceAccount.name=existing \
+	credentials.recheckInterval=1m
 
 .PHONY: helm-validate
 helm-validate: kubeconform ## Render the Helm chart with its toggles and validate the objects against the Kubernetes API schemas.

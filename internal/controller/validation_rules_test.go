@@ -99,9 +99,12 @@ var _ = Describe("CRD validation rules", func() {
 		return func(spec map[string]any) { unstructured.RemoveNestedField(spec, path...) }
 	}
 
+	// expectAccepted asks the API server to validate the object without
+	// storing it: hundreds of stored monitors would keep the manager of the
+	// suite busy for nothing.
 	expectAccepted := func(obj *unstructured.Unstructured) {
 		GinkgoHelper()
-		Expect(k8sClient.Create(context.TODO(), obj)).To(Succeed())
+		Expect(k8sClient.Create(context.TODO(), obj, client.DryRunAll)).To(Succeed())
 	}
 	// expectRejected asserts the API server refuses the object and that its
 	// answer mentions every given fragment, so the user can tell what to fix.
@@ -115,8 +118,11 @@ var _ = Describe("CRD validation rules", func() {
 		}
 	}
 
+	// stored creates the object for real and returns what the API server
+	// kept, defaults included.
 	stored := func(obj *unstructured.Unstructured) *unstructured.Unstructured {
 		GinkgoHelper()
+		createForSpec(obj)
 		out := obj.DeepCopy()
 		Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(obj), out)).To(Succeed())
 		return out
@@ -191,10 +197,7 @@ var _ = Describe("CRD validation rules", func() {
 		// default existed `sinks: {}` produced a pod without any sink.
 		DescribeTable("enables the Prometheus sink when it is left out",
 			func(sinks map[string]any) {
-				obj := monitor("prom-default", set(sinks, "sinks"))
-				expectAccepted(obj)
-
-				got := stored(obj)
+				got := stored(monitor("prom-default", set(sinks, "sinks")))
 				enabled, found, err := unstructured.NestedBool(got.Object, "spec", "sinks", "prometheus", "enabled")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(found).To(BeTrue(), "spec.sinks.prometheus.enabled must be defaulted")
@@ -541,9 +544,7 @@ var _ = Describe("CRD validation rules", func() {
 		})
 
 		It("accepts Secret keys and defaults them", func() {
-			obj := monitor("secret-keys", set("db.user-name_1", "database", "credentialsSecret", "usernameKey"))
-			expectAccepted(obj)
-			got := stored(obj)
+			got := stored(monitor("secret-keys", set("db.user-name_1", "database", "credentialsSecret", "usernameKey")))
 			user, _, _ := unstructured.NestedString(got.Object, "spec", "database", "credentialsSecret", "usernameKey")
 			pass, _, _ := unstructured.NestedString(got.Object, "spec", "database", "credentialsSecret", "passwordKey")
 			Expect(user).To(Equal("db.user-name_1"))
@@ -634,7 +635,7 @@ var _ = Describe("CRD validation rules", func() {
 		// column was blank for exactly the monitors that needed attention.
 		It("always writes status.ready on a monitor", func() {
 			obj := monitor("not-ready")
-			expectAccepted(obj)
+			createForSpec(obj)
 
 			Eventually(func(g Gomega) {
 				got := obj.DeepCopy()
@@ -653,7 +654,7 @@ var _ = Describe("CRD validation rules", func() {
 		// integer; it now reads this field.
 		It("reports the number of metrics of a library", func() {
 			obj := library("counted", validMetric("one"), validMetric("two"), validMetric("three"))
-			expectAccepted(obj)
+			createForSpec(obj)
 
 			Eventually(func(g Gomega) {
 				got := obj.DeepCopy()
@@ -667,7 +668,7 @@ var _ = Describe("CRD validation rules", func() {
 
 		It("follows the library when metrics are removed", func() {
 			obj := library("shrinking", validMetric("one"), validMetric("two"))
-			expectAccepted(obj)
+			createForSpec(obj)
 
 			Eventually(func(g Gomega) {
 				got := obj.DeepCopy()
@@ -741,5 +742,36 @@ var _ = Describe("CRD validation rules", func() {
 		It("accepts a Secret reference", func() {
 			expectAccepted(monitor("by-secret"))
 		})
+
+		// A name the API server could never have for a Secret used to be
+		// accepted and then failed on every reconcile as a read error.
+		DescribeTable("rejects a Secret name that is not an object name",
+			func(name string) {
+				expectRejected(monitor("unusable", set(name, "database", "credentialsSecret", "name")),
+					"spec.database.credentialsSecret.name")
+			},
+			Entry("another namespace", "other-namespace/victim"),
+			Entry("path traversal", "../../other/secrets/victim"),
+			Entry("dots only", ".."),
+			Entry("upper case", "DB-Creds"),
+			Entry("underscore", "db_creds"),
+			Entry("space", "db creds"),
+			Entry("percent escape", "a%2Fb"),
+			Entry("leading dash", "-creds"),
+			Entry("trailing dot", "creds."),
+			Entry("empty label", "db..creds"),
+			Entry("longer than 253 characters", strings.Repeat("a", 254)),
+		)
+
+		DescribeTable("accepts valid Secret names",
+			func(name string) {
+				expectAccepted(monitor("usable", set(name, "database", "credentialsSecret", "name")))
+			},
+			Entry("simple", "db-creds"),
+			Entry("with dots", "orders.db.credentials"),
+			Entry("digits", "0db1"),
+			Entry("single character", "a"),
+			Entry("253 characters", strings.Repeat("a", 253)),
+		)
 	})
 })

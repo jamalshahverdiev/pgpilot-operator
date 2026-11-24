@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -66,6 +67,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var credentialsRecheck time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -81,6 +83,10 @@ func main() {
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	flag.DurationVar(&credentialsRecheck, "credentials-recheck-interval", 5*time.Minute,
+		"How often a credentials Secret referenced by a PgpilotMonitor is read again. "+
+			"A changed Secret rolls the collector pod, so this bounds how long a rotated password goes unnoticed. "+
+			"At least 10s; 0 means the default of 5m.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
@@ -158,7 +164,30 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+
+	// Whether ServiceMonitors can be created decides which kinds the manager
+	// caches, so it has to be known before the manager exists.
+	dc, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create discovery client")
+		os.Exit(1)
+	}
+	serviceMonitorEnabled := builder.HasServiceMonitorCRD(dc)
+	if serviceMonitorEnabled {
+		setupLog.Info("ServiceMonitor CRD detected, will create ServiceMonitor resources")
+	}
+
+	controllerOptions := controller.Options{
+		ServiceMonitorEnabled: serviceMonitorEnabled,
+		CredentialsRecheck:    credentialsRecheck,
+	}
+	if err := controllerOptions.Validate(); err != nil {
+		setupLog.Error(err, "invalid command line")
+		os.Exit(1)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, controller.ManagerOptions(ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -176,36 +205,14 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}, controllerOptions))
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
-	dc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
-	if err != nil {
-		setupLog.Error(err, "unable to create discovery client")
-		os.Exit(1)
-	}
-	serviceMonitorEnabled := builder.HasServiceMonitorCRD(dc)
-	if serviceMonitorEnabled {
-		setupLog.Info("ServiceMonitor CRD detected, will create ServiceMonitor resources")
-	}
-
-	if err := (&controller.PgpilotMonitorReconciler{
-		Client:                mgr.GetClient(),
-		Scheme:                mgr.GetScheme(),
-		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"), //nolint:staticcheck // SA1019
-		ServiceMonitorEnabled: serviceMonitorEnabled,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "PgpilotMonitor")
-		os.Exit(1)
-	}
-	if err := (&controller.PgpilotMetricLibraryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "PgpilotMetricLibrary")
+	if err := controller.SetupWithManager(mgr, controllerOptions); err != nil {
+		setupLog.Error(err, "unable to create controllers")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

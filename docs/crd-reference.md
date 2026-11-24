@@ -36,9 +36,9 @@ or **Secret-based** (`credentialsSecret`, recommended for production).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `name` | string | yes | | Secret name in the same namespace |
+| `name` | string | yes | | Secret name in the same namespace (a valid object name: lower-case letters, digits, `-`, `.`; max 253 chars) |
 | `usernameKey` | string | no | `username` | Key inside the Secret for the database username (letters, digits, `-`, `_`, `.`) |
-| `passwordKey` | string | no | `password` | Key inside the Secret for the database password (letters, digits, `-`, `_`, `.`) |
+| `passwordKey` | string | no | `password` | Key inside the Secret for the database password (letters, digits, `-`, `_`, `.`). The key must exist; its value may be empty |
 
 ### spec.metrics
 
@@ -86,7 +86,8 @@ Standard Kubernetes `ResourceRequirements` (`requests`, `limits`).
 
 The labels and annotations the operator sets itself (`app.kubernetes.io/name`,
 `app.kubernetes.io/instance`, `app.kubernetes.io/managed-by`,
-`app.kubernetes.io/component`, `pgpilot.io/monitor`, `pgpilot.io/config-hash`)
+`app.kubernetes.io/component`, `pgpilot.io/monitor`, `pgpilot.io/config-hash`,
+`pgpilot.io/credentials-version`)
 always win over an entry with the same key. Keys under `pgpilot.io/` are
 reserved for the operator and are rejected. Other `app.kubernetes.io/*` keys,
 such as `app.kubernetes.io/part-of`, are yours to set.
@@ -100,7 +101,7 @@ such as `app.kubernetes.io/part-of`, are yours to set.
 | `observedGeneration` | int64 | Last reconciled `.metadata.generation` |
 | `lastReconciled` | timestamp | Time of last successful reconcile |
 | `configHash` | string | SHA-256 of the rendered `sources.yaml` + `metrics.yaml`. Changes whenever the underlying pgwatch Deployment is (or is about to be) rolled — useful for external tools tracking rollouts. |
-| `conditions` | []Condition | `Ready`, `ConfigGenerated`, `DatabaseReachable` |
+| `conditions` | []Condition | `Ready`, `ConfigGenerated`, `CredentialsAvailable` (credentials are configured and, for a Secret, both keys have a value; not a connectivity check) |
 
 ### Printer columns
 

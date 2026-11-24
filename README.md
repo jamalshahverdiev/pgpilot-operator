@@ -11,7 +11,7 @@ Kubernetes operator for declarative PostgreSQL monitoring via [pgwatch](https://
 - **Prometheus / vmagent ready** — Prometheus sink enabled by default. Custom labels and annotations on pods and services for annotation-based discovery.
 - **Optional ServiceMonitor** — auto-generated when prometheus-operator CRD is detected.
 - **GitOps-first** — pgwatch runs in read-only file mode. The operator is the single source of truth.
-- **Hardened** — non-root, read-only root filesystem, drop all capabilities, least-privilege RBAC.
+- **Hardened** — non-root, read-only root filesystem, drop all capabilities. The operator can read a Secret only by name (no list, no watch) and keeps only its own objects in memory.
 
 ## Quickstart
 

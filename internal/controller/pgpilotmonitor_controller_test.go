@@ -62,7 +62,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 				"password": "secret",
 			},
 		}
-		Expect(k8sClient.Create(context.TODO(), secret)).To(Succeed())
+		createForSpec(secret)
 
 		monitor = &pgpilotv1.PgpilotMonitor{
 			Name:      "test-db",
@@ -106,7 +106,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		}
 
 		It("should start pgwatch with its web server disabled", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			Eventually(func(g Gomega) {
 				_, args := pgwatchArgs(g)
@@ -118,7 +118,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		// flag must be corrected in place, which is what rolls the collector
 		// pods when the operator is upgraded.
 		It("should add the web server flag to an existing Deployment that lacks it", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			var legacy *appsv1.Deployment
 			Eventually(func(g Gomega) {
@@ -151,7 +151,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		})
 
 		It("should create ConfigMap, Deployment, and Service", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			cmKey := types.NamespacedName{
 				Name:      builder.ResourceName("test-db") + "-config",
@@ -179,7 +179,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		})
 
 		It("should set ConfigGenerated condition to True", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			Eventually(func() bool {
 				var m pgpilotv1.PgpilotMonitor
@@ -195,8 +195,8 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 			}, timeout, interval).Should(BeTrue())
 		})
 
-		It("should set DatabaseReachable condition to True", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+		It("should set CredentialsAvailable condition to True", func() {
+			createForSpec(monitor)
 
 			Eventually(func() bool {
 				var m pgpilotv1.PgpilotMonitor
@@ -204,7 +204,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 					return false
 				}
 				for _, c := range m.Status.Conditions {
-					if c.Type == "DatabaseReachable" && c.Status == metav1.ConditionTrue {
+					if c.Type == conditionCredentials && c.Status == metav1.ConditionTrue {
 						return true
 					}
 				}
@@ -213,7 +213,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		})
 
 		It("should set finalizer on the monitor", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			Eventually(func() bool {
 				var m pgpilotv1.PgpilotMonitor
@@ -233,7 +233,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 			// user wrote. (The typed monitor of this suite would itself
 			// send empty `image`, `resources` and metadata blocks.)
 			written := minimalMonitor(ns.Name, "as-written")
-			Expect(k8sClient.Create(context.TODO(), written)).To(Succeed())
+			createForSpec(written)
 
 			stored := written.DeepCopy()
 			Eventually(func(g Gomega) {
@@ -252,7 +252,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		})
 
 		It("should release the finalizer when the monitor is deleted", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 			key := types.NamespacedName{Name: "test-db", Namespace: ns.Name}
 
 			Eventually(func(g Gomega) {
@@ -270,7 +270,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		})
 
 		It("should set OwnerReference on child resources", func() {
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			cmKey := types.NamespacedName{
 				Name:      builder.ResourceName("test-db") + "-config",
@@ -294,7 +294,7 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 	Context("with missing Secret", func() {
 		It("should set Ready=False with SecretNotFound reason", func() {
 			monitor.Spec.Database.CredentialsSecret.Name = "nonexistent-secret"
-			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			createForSpec(monitor)
 
 			Eventually(func() string {
 				var m pgpilotv1.PgpilotMonitor

@@ -28,11 +28,16 @@ rules:
   - ""
   resources:
   - pods
-  - secrets
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
 - apiGroups:
   - apps
   resources:

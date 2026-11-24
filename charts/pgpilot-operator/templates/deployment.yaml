@@ -39,6 +39,9 @@ spec:
             - --leader-elect
             {{- end }}
             - --health-probe-bind-address={{ .Values.healthProbe.bindAddress }}
+            {{- with .Values.credentials.recheckInterval }}
+            - --credentials-recheck-interval={{ . }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:8443
             {{- else }}

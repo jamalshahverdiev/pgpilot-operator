@@ -15,9 +15,10 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
+  # Secrets are read one at a time, by name; never listed or watched.
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, watch]
+    verbs: [get]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [create, delete, get, list, patch, update, watch]

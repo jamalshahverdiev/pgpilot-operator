@@ -29,13 +29,17 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/yaml"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 	// +kubebuilder:scaffold:imports
@@ -47,7 +51,45 @@ var (
 	testEnv   *envtest.Environment
 	cfg       *rest.Config
 	k8sClient client.Client
+
+	// operatorConfig authenticates as the operator: a user that holds the
+	// ClusterRole shipped in config/rbac/role.yaml and nothing else. The
+	// manager of this suite runs with it, so every spec also proves that
+	// the shipped permissions are enough.
+	operatorConfig *rest.Config
+	// managerCache is the cache of that manager, for specs about what it
+	// keeps in memory.
+	managerCache cache.Cache
 )
+
+const (
+	// operatorUser is the user the manager runs as.
+	operatorUser = "pgpilot-operator-under-test"
+
+	// Short intervals so specs about Secrets do not have to wait for the
+	// production defaults (thirty seconds and five minutes).
+	testCredentialsRetry   = time.Second
+	testCredentialsRecheck = 2 * time.Second
+)
+
+// operatorRBAC creates the generated ClusterRole of the operator and binds it
+// to operatorUser, in the API server c talks to.
+func operatorRBAC(c client.Client) {
+	GinkgoHelper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "config", "rbac", "role.yaml"))
+	Expect(err).NotTo(HaveOccurred())
+	role := &rbacv1.ClusterRole{}
+	Expect(yaml.Unmarshal(data, role)).To(Succeed())
+	Expect(role.Rules).NotTo(BeEmpty(), "config/rbac/role.yaml holds no rules")
+	Expect(c.Create(context.TODO(), role)).To(Succeed())
+
+	binding := &rbacv1.ClusterRoleBinding{
+		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
+		Subjects: []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: operatorUser}},
+	}
+	binding.Name = "operator-under-test"
+	Expect(c.Create(context.TODO(), binding)).To(Succeed())
+}
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -87,24 +129,31 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
-	// Start a real manager so reconcile loops run.
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	By("running the manager with the shipped RBAC and the production cache options")
+	operatorRBAC(k8sClient)
+	// A config without limits would get client-go's default of five
+	// requests per second; the real operator runs without client-side
+	// throttling, and envtest gives its own admin config the same room.
+	operator, err := testEnv.AddUser(envtest.User{Name: operatorUser}, &rest.Config{QPS: 1000, Burst: 2000})
+	Expect(err).NotTo(HaveOccurred())
+	operatorConfig = operator.Config()
+
+	// Start a real manager so reconcile loops run. It is built the way
+	// main builds it: same cache and client settings, same controller setup.
+	options := Options{
+		CredentialsRetry:   testCredentialsRetry,
+		CredentialsRecheck: testCredentialsRecheck,
+	}
+	mgr, err := ctrl.NewManager(operatorConfig, ManagerOptions(ctrl.Options{
 		Scheme: scheme.Scheme,
-	})
+		// No metrics listener: a fixed port would collide with anything
+		// else on the machine, including a second run of this suite.
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	}, options))
 	Expect(err).NotTo(HaveOccurred())
+	managerCache = mgr.GetCache()
 
-	err = (&PgpilotMonitorReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("pgpilot-monitor-test"), //nolint:staticcheck // SA1019
-	}).SetupWithManager(mgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = (&PgpilotMetricLibraryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr)
-	Expect(err).NotTo(HaveOccurred())
+	Expect(SetupWithManager(mgr, options)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()

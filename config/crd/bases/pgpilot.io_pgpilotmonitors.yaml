@@ -84,8 +84,13 @@ spec:
                       password.
                     properties:
                       name:
-                        description: name of the Secret.
+                        description: |-
+                          name of the Secret. It has to be a valid Secret name: lower-case
+                          letters, digits, '-' and '.', starting and ending with a letter or
+                          digit.
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       passwordKey:
                         default: password
@@ -587,7 +592,10 @@ spec:
                   Typical types:
                     - "Ready"             — Pod is up and scraping
                     - "ConfigGenerated"   — ConfigMap matches spec
-                    - "DatabaseReachable" — pgwatch can connect to the target DB
+                    - "CredentialsAvailable" — inline credentials are set, or the
+                      referenced Secret exists and has a value under both keys. Whether
+                      the database accepts them is not checked: pgwatch keeps retrying,
+                      and the pgwatch_instance_up metric tells.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

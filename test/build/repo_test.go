@@ -513,3 +513,37 @@ func TestDependabot_CoversIndirectModulesAndAllEcosystems(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// manager wiring
+// ---------------------------------------------------------------------------
+
+// The envtest suite proves that the controllers work with the shipped role and
+// cache settings, but only for a manager built through the controller
+// package. main has to build its manager the same way: with `get` as the only
+// permission on Secrets, a manager without those settings stops at the first
+// Secret it reads.
+func TestMain_BuildsTheManagerThroughTheControllerPackage(t *testing.T) {
+	main := readRepoFile(t, "cmd/main.go")
+
+	for _, call := range []string{
+		"controller.ManagerOptions(ctrl.Options{",
+		"controller.SetupWithManager(mgr, controllerOptions)",
+		"CredentialsRecheck:    credentialsRecheck,",
+		"ServiceMonitorEnabled: serviceMonitorEnabled,",
+	} {
+		if !strings.Contains(main, call) {
+			t.Errorf("cmd/main.go no longer contains %q", call)
+		}
+	}
+	// Settings applied here would bypass what the suite tests.
+	for _, forbidden := range []string{"Reconciler{", "cache.Options{", "client.Options{"} {
+		if strings.Contains(main, forbidden) {
+			t.Errorf("cmd/main.go sets up %q itself; that belongs in internal/controller", forbidden)
+		}
+	}
+	if !regexp.MustCompile(`flag\.DurationVar\(&credentialsRecheck, "credentials-recheck-interval", 5\*time\.Minute,`).
+		MatchString(main) {
+		t.Error("the --credentials-recheck-interval flag or its five minute default is gone")
+	}
+}
