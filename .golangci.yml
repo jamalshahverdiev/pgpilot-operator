@@ -1,6 +1,9 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  # The e2e suite is behind a build tag; without it the linter never sees it.
+  build-tags:
+    - e2e
 linters:
   default: none
   enable:
@@ -36,6 +39,11 @@ linters:
       - linters:
           - lll
         path: api/*
+      # Tests spell out the same literal in many cases on purpose; a shared
+      # constant would only make the expected values harder to read.
+      - linters:
+          - goconst
+        path: _test\.go
       - linters:
           - dupl
           - lll
