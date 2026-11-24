@@ -11,7 +11,6 @@ spec:
     - name: orders_queue_depth
       description: "Orders stuck in pending state"
       interval: 60s
-      statementTimeoutSeconds: 5
       sqls:
         "13": |
           SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,
@@ -26,7 +25,6 @@ spec:
     - name: payments_failed_rate
       description: "Failed payment count over the last minute"
       interval: 30s
-      statementTimeoutSeconds: 5
       sqls:
         "13": |
           SELECT (extract(epoch from now())*1e9)::int8 AS epoch_ns,

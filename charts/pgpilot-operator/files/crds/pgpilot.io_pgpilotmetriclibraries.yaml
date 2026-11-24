@@ -18,7 +18,7 @@ spec:
   versions:
   - additionalPrinterColumns:
     - description: Number of metric definitions
-      jsonPath: .spec.metrics[*].name
+      jsonPath: .status.metricCount
       name: Metrics
       type: integer
     - jsonPath: .metadata.creationTimestamp
@@ -54,8 +54,9 @@ spec:
             description: spec defines the desired state of PgpilotMetricLibrary
             properties:
               metrics:
-                description: metrics is the list of metric definitions provided by
-                  this library.
+                description: |-
+                  metrics is the list of metric definitions provided by this library.
+                  Metric names must be unique within the list.
                 items:
                   description: |-
                     MetricDefinition describes one pgwatch SQL metric. It is the unit shared
@@ -90,8 +91,9 @@ spec:
                         (not database-scoped).
                       type: boolean
                     masterOnly:
-                      description: masterOnly restricts collection to primary PostgreSQL
-                        instances.
+                      description: |-
+                        masterOnly restricts collection to primary PostgreSQL instances.
+                        Cannot be combined with standbyOnly.
                       type: boolean
                     name:
                       description: |-
@@ -105,20 +107,37 @@ spec:
                       additionalProperties:
                         type: string
                       description: |-
-                        sqls maps PostgreSQL major version (as a string, e.g. "13", "14")
-                        to the SQL statement pgwatch will execute on that version. The key
-                        "*" (or the lowest-version entry) acts as a fallback — exact semantics
-                        match pgwatch's own metrics.yaml.
+                        sqls maps a PostgreSQL major version to the SQL statement pgwatch
+                        executes from that version on. For a given server pgwatch picks the
+                        entry with the highest key that is not above the server's major
+                        version, so "14" covers 14 and everything newer until a higher key
+                        is defined, and "0" covers every version. A server older than the
+                        lowest key gets no data for the metric.
+
+                        Keys are major versions written as plain integers in strings ("0",
+                        "14"), not server_version_num values such as 170000, and there is no
+                        wildcard key. Statements must not be empty.
+                      maxProperties: 32
                       minProperties: 1
                       type: object
+                      x-kubernetes-validations:
+                      - message: sqls keys must be PostgreSQL major versions written
+                          as plain integers, e.g. "14" ("0" matches every version)
+                        rule: self.all(k, k.matches('^(0|[1-9][0-9]{0,2})$'))
+                      - message: sqls statements must not be empty
+                        rule: self.all(k, size(self[k]) > 0)
                     standbyOnly:
-                      description: standbyOnly restricts collection to standby (replica)
-                        instances.
+                      description: |-
+                        standbyOnly restricts collection to standby (replica) instances.
+                        Cannot be combined with masterOnly.
                       type: boolean
                     statementTimeoutSeconds:
                       description: |-
-                        statementTimeoutSeconds limits execution time for the SQL. 0 means
-                        no explicit timeout. pgwatch enforces this per-query.
+                        statementTimeoutSeconds is accepted for compatibility and ignored.
+
+                        Deprecated: pgwatch has no per-metric statement timeout, so the value
+                        was never applied. Limit query time on the database side instead,
+                        e.g. `ALTER ROLE <monitoring role> SET statement_timeout = '5s'`.
                       format: int32
                       minimum: 0
                       type: integer
@@ -126,8 +145,17 @@ spec:
                   - name
                   - sqls
                   type: object
+                  x-kubernetes-validations:
+                  - message: masterOnly and standbyOnly are mutually exclusive
+                    rule: '!(has(self.masterOnly) && self.masterOnly && has(self.standbyOnly)
+                      && self.standbyOnly)'
+                maxItems: 256
                 minItems: 1
                 type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: metric names must be unique
+                  rule: self.all(x, self.exists_one(y, y.name == x.name))
             required:
             - metrics
             type: object
@@ -196,6 +224,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              metricCount:
+                description: |-
+                  metricCount is the number of metric definitions in the library as
+                  of observedGeneration.
+                format: int32
+                type: integer
               observedGeneration:
                 description: |-
                   observedGeneration is the .metadata.generation the controller last

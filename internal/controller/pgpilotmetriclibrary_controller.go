@@ -66,6 +66,8 @@ func (r *PgpilotMetricLibraryReconciler) Reconcile(ctx context.Context, req ctrl
 		Message:            message,
 	})
 	lib.Status.ObservedGeneration = lib.Generation
+	// The CRD caps the list at 256 entries, far below the int32 range.
+	lib.Status.MetricCount = int32(len(lib.Spec.Metrics)) //nolint:gosec // bounded by the CRD's maxItems
 
 	if err := r.Status().Update(ctx, &lib); err != nil {
 		log.Error(err, "failed to update library status")

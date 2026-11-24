@@ -2,6 +2,8 @@ package builder
 
 import (
 	"testing"
+
+	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
 
 func TestBuildServiceMonitor_BasicShape(t *testing.T) {
@@ -60,7 +62,7 @@ func TestBuildServiceMonitor_NamespaceSelector(t *testing.T) {
 
 func TestBuildServiceMonitor_Labels_MergeServiceMetadata(t *testing.T) {
 	monitor := newTestMonitor()
-	monitor.Spec.ServiceMetadata.Labels = map[string]string{"team": "ops"}
+	monitor.Spec.ServiceMetadata.Labels = map[string]pgpilotv1.LabelValue{"team": "ops"}
 	sm := BuildServiceMonitor(monitor)
 
 	if sm.Labels["team"] != "ops" {

@@ -20,6 +20,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,7 +71,11 @@ var _ = BeforeSuite(func() {
 		ErrorIfCRDPathMissing: true,
 	}
 
-	if dir := getFirstFoundEnvTestBinaryDir(); dir != "" {
+	// `make test` exports KUBEBUILDER_ASSETS for the Kubernetes version of
+	// go.mod, and that choice must win. Only when it is not set (a run from
+	// an IDE or a bare `go test`) fall back to what `make setup-envtest`
+	// left under bin/k8s.
+	if dir := envtestBinaryDir(envtestAssetsFromEnv(), filepath.Join("..", "..", "bin", "k8s")); dir != "" {
 		testEnv.BinaryAssetsDirectory = dir
 	}
 
@@ -113,17 +120,63 @@ var _ = AfterSuite(func() {
 	}, time.Minute, time.Second).Should(Succeed())
 })
 
-func getFirstFoundEnvTestBinaryDir() string {
-	basePath := filepath.Join("..", "..", "bin", "k8s")
-	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		logf.Log.Error(err, "Failed to read directory", "path", basePath)
+// envtestAssetsFromEnv returns the directory `make test` selected.
+func envtestAssetsFromEnv() string {
+	return os.Getenv("KUBEBUILDER_ASSETS")
+}
+
+// envtestBinaryDir decides which directory to hand to envtest explicitly. It
+// returns "" when KUBEBUILDER_ASSETS is set - envtest reads the variable
+// itself, and overriding it would run the suite against another Kubernetes
+// version than the one requested - and otherwise the newest version found
+// under basePath.
+func envtestBinaryDir(assetsFromEnv, basePath string) string {
+	if assetsFromEnv != "" {
 		return ""
 	}
+	return newestEnvTestBinaryDir(basePath)
+}
+
+// newestEnvTestBinaryDir returns the directory under basePath that holds the
+// envtest binaries of the highest Kubernetes version, or "" when there is
+// none. setup-envtest names them "<version>-<os>-<arch>"; several accumulate
+// once the Kubernetes libraries have been upgraded, and the tests have to run
+// against the newest one, not whichever sorts first.
+func newestEnvTestBinaryDir(basePath string) string {
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		return ""
+	}
+	best, bestVersion := "", []int(nil)
 	for _, entry := range entries {
-		if entry.IsDir() {
-			return filepath.Join(basePath, entry.Name())
+		if !entry.IsDir() {
+			continue
+		}
+		version := leadingVersion(entry.Name())
+		if version == nil {
+			continue
+		}
+		if best == "" || slices.Compare(version, bestVersion) > 0 {
+			best, bestVersion = entry.Name(), version
 		}
 	}
-	return ""
+	if best == "" {
+		return ""
+	}
+	return filepath.Join(basePath, best)
+}
+
+// leadingVersion parses the dotted number a name starts with ("1.37.0" in
+// "1.37.0-linux-amd64"). It returns nil when the name does not start with one.
+func leadingVersion(name string) []int {
+	prefix, _, _ := strings.Cut(name, "-")
+	var version []int
+	for part := range strings.SplitSeq(prefix, ".") {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil
+		}
+		version = append(version, n)
+	}
+	return version
 }
