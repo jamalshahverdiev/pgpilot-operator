@@ -26,7 +26,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -220,6 +222,51 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 				}
 				return slices.Contains(m.Finalizers, finalizerName)
 			}, timeout, interval).Should(BeTrue())
+		})
+
+		// Adding the finalizer used to be a full Update of the object: the
+		// spec went back as the Go struct serialises it, the API server
+		// filled the empty `image` block with defaults, and the operator
+		// ended up owning fields the user never wrote.
+		It("should add the finalizer without rewriting the spec", func() {
+			// Created the way kubectl sends a manifest: only the fields the
+			// user wrote. (The typed monitor of this suite would itself
+			// send empty `image`, `resources` and metadata blocks.)
+			written := minimalMonitor(ns.Name, "as-written")
+			Expect(k8sClient.Create(context.TODO(), written)).To(Succeed())
+
+			stored := written.DeepCopy()
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(written), stored)).To(Succeed())
+				g.Expect(stored.GetFinalizers()).To(ContainElement(finalizerName))
+				_, hasStatus, _ := unstructured.NestedMap(stored.Object, "status")
+				g.Expect(hasStatus).To(BeTrue(), "wait for a full reconcile")
+			}, timeout, interval).Should(Succeed())
+
+			Expect(stored.GetGeneration()).To(BeEquivalentTo(1), "the spec must not have been written")
+			for _, field := range []string{"image", "resources", "podMetadata", "serviceMetadata"} {
+				_, found, err := unstructured.NestedFieldNoCopy(stored.Object, "spec", field)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeFalse(), "spec.%s was never set by the user and must stay unset", field)
+			}
+		})
+
+		It("should release the finalizer when the monitor is deleted", func() {
+			Expect(k8sClient.Create(context.TODO(), monitor)).To(Succeed())
+			key := types.NamespacedName{Name: "test-db", Namespace: ns.Name}
+
+			Eventually(func(g Gomega) {
+				var m pgpilotv1.PgpilotMonitor
+				g.Expect(k8sClient.Get(context.TODO(), key, &m)).To(Succeed())
+				g.Expect(m.Finalizers).To(ContainElement(finalizerName))
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(context.TODO(), monitor)).To(Succeed())
+
+			Eventually(func() bool {
+				var m pgpilotv1.PgpilotMonitor
+				return apierrors.IsNotFound(k8sClient.Get(context.TODO(), key, &m))
+			}, timeout, interval).Should(BeTrue(), "the monitor must be gone once its finalizer is released")
 		})
 
 		It("should set OwnerReference on child resources", func() {
