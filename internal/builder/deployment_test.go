@@ -268,7 +268,7 @@ func TestBuildDeployment_ConfigHashAnnotation(t *testing.T) {
 
 func TestBuildDeployment_PodMetadata_Merge(t *testing.T) {
 	monitor := newTestMonitor()
-	monitor.Spec.PodMetadata.Labels = map[string]string{"team": "users"}
+	monitor.Spec.PodMetadata.Labels = map[string]pgpilotv1.LabelValue{"team": "users"}
 	monitor.Spec.PodMetadata.Annotations = map[string]string{"prometheus.io/scrape": "true"}
 	merged := MergedMetrics{}
 	dep := BuildDeployment(monitor, merged, "h")

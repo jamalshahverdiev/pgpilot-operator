@@ -4,7 +4,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"net"
+	"net/url"
 	"sort"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
@@ -124,10 +128,20 @@ func buildConnStr(db pgpilotv1.DatabaseRef) string {
 	if sslmode == "" {
 		sslmode = pgpilotv1.SSLModeDisable
 	}
-	return fmt.Sprintf(
-		"postgresql://%s:%d/%s?sslmode=%s",
-		db.Host, port, db.Database, sslmode,
-	)
+	// The URL is assembled field by field instead of with a format string:
+	// an IPv6 address has to be bracketed (given bare, "fd00::10:5432" reads
+	// as a different address), and a database name may contain characters
+	// such as '#', '?' or '%' that would otherwise cut the URL short and
+	// drop the sslmode after it. For plain host and database names the
+	// result is identical to the previous format.
+	host := strings.TrimSuffix(strings.TrimPrefix(db.Host, "["), "]")
+	u := url.URL{
+		Scheme:   "postgresql",
+		Host:     net.JoinHostPort(host, strconv.Itoa(int(port))),
+		Path:     "/" + db.Database,
+		RawQuery: url.Values{"sslmode": {string(sslmode)}}.Encode(),
+	}
+	return u.String()
 }
 
 // pgwatch metrics.yaml top-level structure.

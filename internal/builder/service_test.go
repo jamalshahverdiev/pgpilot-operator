@@ -50,7 +50,7 @@ func TestBuildService_SystemLabels(t *testing.T) {
 
 func TestBuildService_ServiceMetadata_Merge(t *testing.T) {
 	monitor := newTestMonitor()
-	monitor.Spec.ServiceMetadata.Labels = map[string]string{"team": "data"}
+	monitor.Spec.ServiceMetadata.Labels = map[string]pgpilotv1.LabelValue{"team": "data"}
 	monitor.Spec.ServiceMetadata.Annotations = map[string]string{
 		"prometheus.io/scrape": "true",
 		"prometheus.io/port":   "9187",

@@ -2,6 +2,94 @@
 
 ## Unreleased
 
+### Validation
+
+The API server now rejects objects the operator cannot run. These were accepted
+before and failed later, usually without a clear message:
+
+- `spec.sinks` without an enabled sink, or with the gRPC sink enabled but no
+  `endpoint`. `sinks: {}` now really means "Prometheus on port 9187": the
+  Prometheus sink is enabled whenever `sinks.prometheus` is left out. To run
+  with gRPC only, set `sinks.prometheus.enabled: false`.
+- `spec.metrics` selecting nothing.
+- The same library listed twice, and two metrics with the same name in one
+  list (the last one used to win silently).
+- `sqls` keys that are not PostgreSQL major versions written as plain integers.
+  `"*"`, `"14.2"` and `"v14"` were dropped silently, leaving the metric without
+  SQL; use `"0"` for "every version". `"014"` and `"+14"` were read as 14 and
+  now have to be written `"14"`. Keys above 999 (a `server_version_num` such as
+  `170000`) never matched a server. Empty statements are rejected too.
+- `masterOnly` and `standbyOnly` both set on one metric.
+- A `host` that is not a host name or IP address (URL metacharacters, a port
+  typed into the host) and a database name over 63 characters.
+- `customTags` keys that cannot work: empty, starting with `__`, or `dbname`
+  (pgwatch sets it to the monitor name). Other keys are still accepted; on the
+  Prometheus sink a character outside `[a-zA-Z0-9_]` is exported as `_`.
+- `podMetadata` / `serviceMetadata` labels and annotation keys Kubernetes
+  itself would refuse on the Pod or Service. Keys under `pgpilot.io/` are
+  reserved for the operator.
+
+New limits, to keep validation cost bounded: 256 metrics per library and per
+`custom` list, 32 `sqls` entries per metric, 32 libraries per monitor, 32
+`customTags`, 32 labels and 64 annotations per metadata block. `preset` must be
+lower-case letters, digits and `_` (at most 63 characters), Secret keys letters,
+digits, `-`, `_` and `.`, and a gRPC `endpoint` must not contain whitespace.
+
+Fixed alongside:
+
+- An IPv6 `host` works, with or without brackets; it used to be glued to the
+  port into a different address. Database names with `#`, `?`, `%` or spaces
+  no longer cut the connection URL short. Connection strings for ordinary host
+  and database names are unchanged, so no pod is rolled because of this.
+- The operator adds and removes its finalizer without rewriting the spec. It
+  used to send the whole object back, which made the API server store defaults
+  for `spec.image` on every monitor and counted as a spec change.
+- `status.ready` is always written, so `kubectl get pm` shows `false` instead
+  of an empty READY column.
+- `kubectl get pml` shows the number of metrics (`status.metricCount`); the
+  column was always empty.
+- `statementTimeoutSeconds` is deprecated. It was never applied: pgwatch has no
+  per-metric timeout. The field is still accepted and ignored.
+
+Upgrade notes:
+
+- A monitor that omitted `sinks.prometheus` (`sinks: {}`, or only a `grpc`
+  block) gets the Prometheus sink as soon as the CRD is updated: defaults also
+  apply to stored objects when they are read, so its pod is rolled with
+  `/metrics` on port 9187. Add `prometheus: {enabled: false}` to keep a
+  gRPC-only monitor without it.
+- A monitor that set both `masterOnly` and `standbyOnly` was collecting on
+  primaries only; keep `masterOnly` to preserve that.
+- Existing objects that break one of the new rules are not changed, but how
+  much the API server tolerates them depends on the Kubernetes version:
+
+  | Kubernetes | Editing other fields, labels | Deleting | Status written by the operator |
+  |------------|------------------------------|----------|--------------------------------|
+  | 1.33+      | works                        | works    | works                          |
+  | 1.30–1.32  | works                        | works    | refused until the object is fixed: READY, conditions and `metricCount` stop updating and the operator logs `update status ... is invalid`. The pgwatch pod keeps running. |
+  | 1.28, 1.29 | refused                      | hangs in `Terminating` | refused |
+
+  In every case the way out is to correct the offending field, which is always
+  accepted - also while the object is `Terminating`. A list that exceeds a new
+  size limit has to be shortened before any entry of it can be edited.
+- Before upgrading the CRDs on Kubernetes older than 1.33, look for objects
+  that will be affected. The usual ones are the `"*"` key in `sqls` and a
+  monitor without an enabled sink:
+
+  ```bash
+  kubectl get pgpilotmonitors,pgpilotmetriclibraries -A -o json | jq -r '
+    .items[] | . as $o
+    | (if $o.kind == "PgpilotMonitor" then ($o.spec.metrics.custom // []) else ($o.spec.metrics // []) end) as $metrics
+    | select(
+        ($metrics | any((.sqls // {}) | keys | any(test("^(0|[1-9][0-9]{0,2})$") | not)))
+        or ($metrics | any(.masterOnly == true and .standbyOnly == true))
+        or ($o.kind == "PgpilotMonitor"
+            and $o.spec.sinks.prometheus.enabled == false
+            and $o.spec.sinks.grpc.enabled != true)
+      )
+    | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+  ```
+
 ### Changed
 
 - Built with Go 1.27 (was 1.25, which no longer receives security fixes). The

@@ -42,7 +42,7 @@ func BuildDeployment(
 ) *appsv1.Deployment {
 	name := ResourceName(monitor.Name)
 	sysLabels := SystemLabels(monitor.Name)
-	podLabels := MergeLabels(sysLabels, monitor.Spec.PodMetadata.Labels)
+	podLabels := MergeLabels(sysLabels, monitor.Spec.PodMetadata.LabelMap())
 
 	podAnnotations := map[string]string{
 		AnnotationConfigHash: configHash,

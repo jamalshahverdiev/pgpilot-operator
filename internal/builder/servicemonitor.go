@@ -18,7 +18,7 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 		APIVersion: "monitoring.coreos.com/v1", Kind: "ServiceMonitor",
 		Name:      name,
 		Namespace: monitor.Namespace,
-		Labels:    MergeLabels(sysLabels, monitor.Spec.ServiceMetadata.Labels),
+		Labels:    MergeLabels(sysLabels, monitor.Spec.ServiceMetadata.LabelMap()),
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{

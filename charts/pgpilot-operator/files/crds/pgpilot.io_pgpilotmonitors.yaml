@@ -43,6 +43,16 @@ spec:
           collector against the described PostgreSQL database and expose its
           metrics via the configured sinks. It is namespace-scoped and users may
           create any number of them in any namespace.
+
+          The name is used to derive the names of the generated Service, Deployment
+          and ConfigMap ("pgpilot-<name>") and as a label value. Keep it to at most
+          55 characters without dots; with a longer or dotted name the Service cannot
+          be created.
+
+          This is deliberately not a validation rule on the object: a rule on
+          metadata.name is evaluated on every update, the name can never be changed,
+          and so a monitor that already exists with such a name could no longer be
+          updated at all - not even to remove its finalizer when it is deleted.
         properties:
           apiVersion:
             description: |-
@@ -82,12 +92,16 @@ spec:
                         description: |-
                           passwordKey is the key inside the Secret containing the database
                           password. Defaults to "password".
+                        maxLength: 253
+                        pattern: ^[-._a-zA-Z0-9]*$
                         type: string
                       usernameKey:
                         default: username
                         description: |-
                           usernameKey is the key inside the Secret containing the database
                           username. Defaults to "username".
+                        maxLength: 253
+                        pattern: ^[-._a-zA-Z0-9]*$
                         type: string
                     required:
                     - name
@@ -99,15 +113,36 @@ spec:
                       customTags are added to every measurement as additional labels.
                       Useful for `env`, `team`, `tier`, etc. Passed through to pgwatch
                       source configuration verbatim.
+
+                      Keys become label names. On the Prometheus sink a character outside
+                      `[a-zA-Z0-9_]` is exported as `_` (`team-name` becomes `team_name`),
+                      so prefer plain label names. Three kinds of key cannot work and are
+                      rejected: an empty key, a key starting with `__` (reserved by
+                      Prometheus; pgwatch then fails to export every series of the
+                      database) and `dbname`, which pgwatch sets to the monitor name.
+                    maxProperties: 32
                     type: object
+                    x-kubernetes-validations:
+                    - message: customTags keys must not be empty, must not start with
+                        __ and must not be dbname
+                      rule: self.all(k, size(k) > 0 && !k.startsWith('__') && k !=
+                        'dbname')
                   database:
-                    description: database is the logical database name pgwatch connects
-                      to.
+                    description: |-
+                      database is the logical database name pgwatch connects to.
+                      PostgreSQL limits identifiers to 63 bytes.
+                    maxLength: 63
                     minLength: 1
                     type: string
                   host:
-                    description: host of the PostgreSQL server (DNS name or IP).
+                    description: |-
+                      host of the PostgreSQL server: a DNS name, an IPv4 address or an IPv6
+                      address (with or without square brackets). The port goes into `port`,
+                      not here, and characters that have a meaning in a connection URL are
+                      not accepted.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^([A-Za-z0-9._-]+|\[?[0-9A-Fa-f]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]?)$
                     type: string
                   password:
                     description: |-
@@ -177,7 +212,8 @@ spec:
                   custom:
                     description: |-
                       custom is an inline list of metric definitions. Prefer libraries for
-                      anything reused across monitors.
+                      anything reused across monitors. Metric names must be unique within
+                      the list.
                     items:
                       description: |-
                         MetricDefinition describes one pgwatch SQL metric. It is the unit shared
@@ -212,8 +248,9 @@ spec:
                             (not database-scoped).
                           type: boolean
                         masterOnly:
-                          description: masterOnly restricts collection to primary
-                            PostgreSQL instances.
+                          description: |-
+                            masterOnly restricts collection to primary PostgreSQL instances.
+                            Cannot be combined with standbyOnly.
                           type: boolean
                         name:
                           description: |-
@@ -227,20 +264,37 @@ spec:
                           additionalProperties:
                             type: string
                           description: |-
-                            sqls maps PostgreSQL major version (as a string, e.g. "13", "14")
-                            to the SQL statement pgwatch will execute on that version. The key
-                            "*" (or the lowest-version entry) acts as a fallback — exact semantics
-                            match pgwatch's own metrics.yaml.
+                            sqls maps a PostgreSQL major version to the SQL statement pgwatch
+                            executes from that version on. For a given server pgwatch picks the
+                            entry with the highest key that is not above the server's major
+                            version, so "14" covers 14 and everything newer until a higher key
+                            is defined, and "0" covers every version. A server older than the
+                            lowest key gets no data for the metric.
+
+                            Keys are major versions written as plain integers in strings ("0",
+                            "14"), not server_version_num values such as 170000, and there is no
+                            wildcard key. Statements must not be empty.
+                          maxProperties: 32
                           minProperties: 1
                           type: object
+                          x-kubernetes-validations:
+                          - message: sqls keys must be PostgreSQL major versions written
+                              as plain integers, e.g. "14" ("0" matches every version)
+                            rule: self.all(k, k.matches('^(0|[1-9][0-9]{0,2})$'))
+                          - message: sqls statements must not be empty
+                            rule: self.all(k, size(self[k]) > 0)
                         standbyOnly:
-                          description: standbyOnly restricts collection to standby
-                            (replica) instances.
+                          description: |-
+                            standbyOnly restricts collection to standby (replica) instances.
+                            Cannot be combined with masterOnly.
                           type: boolean
                         statementTimeoutSeconds:
                           description: |-
-                            statementTimeoutSeconds limits execution time for the SQL. 0 means
-                            no explicit timeout. pgwatch enforces this per-query.
+                            statementTimeoutSeconds is accepted for compatibility and ignored.
+
+                            Deprecated: pgwatch has no per-metric statement timeout, so the value
+                            was never applied. Limit query time on the database side instead,
+                            e.g. `ALTER ROLE <monitoring role> SET statement_timeout = '5s'`.
                           format: int32
                           minimum: 0
                           type: integer
@@ -248,11 +302,21 @@ spec:
                       - name
                       - sqls
                       type: object
+                      x-kubernetes-validations:
+                      - message: masterOnly and standbyOnly are mutually exclusive
+                        rule: '!(has(self.masterOnly) && self.masterOnly && has(self.standbyOnly)
+                          && self.standbyOnly)'
+                    maxItems: 256
                     type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: metric names must be unique
+                      rule: self.all(x, self.exists_one(y, y.name == x.name))
                   fromLibraries:
                     description: |-
                       fromLibraries references PgpilotMetricLibrary CRs in the same
-                      namespace whose metrics should be included.
+                      namespace whose metrics should be included. A library can be listed
+                      only once.
                     items:
                       description: |-
                         LibraryRef points to a PgpilotMetricLibrary in the same namespace.
@@ -260,19 +324,33 @@ spec:
                       properties:
                         name:
                           description: name of the PgpilotMetricLibrary.
+                          maxLength: 253
                           minLength: 1
                           type: string
                       required:
                       - name
                       type: object
+                    maxItems: 32
                     type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: a library can be listed only once
+                      rule: self.all(x, self.exists_one(y, y.name == x.name))
                   preset:
                     description: |-
                       preset is the name of a pgwatch built-in preset (e.g. "basic",
                       "standard", "exhaustive", "recommendations", "rds", "aurora").
                       Leave empty to rely entirely on libraries and custom metrics.
+                    maxLength: 63
+                    pattern: ^([a-z][a-z0-9_]*)?$
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: at least one of preset, fromLibraries or custom must be
+                    set
+                  rule: (has(self.preset) && size(self.preset) > 0) || (has(self.fromLibraries)
+                    && size(self.fromLibraries) > 0) || (has(self.custom) && size(self.custom)
+                    > 0)
               podMetadata:
                 description: |-
                   podMetadata extends labels and annotations on the generated Pod
@@ -282,13 +360,44 @@ spec:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: annotations to add on top of system-managed annotations.
+                    description: |-
+                      annotations to add on top of system-managed annotations. Keys must be
+                      valid Kubernetes annotation keys.
+                    maxProperties: 64
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'annotation keys must be valid Kubernetes annotation
+                        keys: an optional DNS subdomain prefix and ''/'', then at
+                        most 63 alphanumeric characters, ''-'', ''_'' or ''.'', starting
+                        and ending with an alphanumeric character'
+                      rule: self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$')
+                        && k.indexOf('/') <= 253)
+                    - message: annotation keys under pgpilot.io/ are reserved for
+                        the operator
+                      rule: '!self.exists(k, k.startsWith(''pgpilot.io/''))'
                   labels:
                     additionalProperties:
+                      description: |-
+                        LabelValue is the value of a Kubernetes label: empty, or at most 63
+                        alphanumeric characters, '-', '_' or '.', starting and ending with an
+                        alphanumeric character.
+                      maxLength: 63
+                      pattern: ^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$
                       type: string
-                    description: labels to add on top of system-managed labels.
+                    description: |-
+                      labels to add on top of system-managed labels. Keys and values must
+                      be valid Kubernetes label keys and values.
+                    maxProperties: 32
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'label keys must be valid Kubernetes label keys: an
+                        optional lower-case DNS subdomain prefix and ''/'', then at
+                        most 63 alphanumeric characters, ''-'', ''_'' or ''.'', starting
+                        and ending with an alphanumeric character'
+                      rule: self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$')
+                        && k.indexOf('/') <= 253)
+                    - message: label keys under pgpilot.io/ are reserved for the operator
+                      rule: '!self.exists(k, k.startsWith(''pgpilot.io/''))'
                 type: object
               resources:
                 description: resources overrides requests/limits on the pgwatch container.
@@ -358,13 +467,44 @@ spec:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: annotations to add on top of system-managed annotations.
+                    description: |-
+                      annotations to add on top of system-managed annotations. Keys must be
+                      valid Kubernetes annotation keys.
+                    maxProperties: 64
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'annotation keys must be valid Kubernetes annotation
+                        keys: an optional DNS subdomain prefix and ''/'', then at
+                        most 63 alphanumeric characters, ''-'', ''_'' or ''.'', starting
+                        and ending with an alphanumeric character'
+                      rule: self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$')
+                        && k.indexOf('/') <= 253)
+                    - message: annotation keys under pgpilot.io/ are reserved for
+                        the operator
+                      rule: '!self.exists(k, k.startsWith(''pgpilot.io/''))'
                   labels:
                     additionalProperties:
+                      description: |-
+                        LabelValue is the value of a Kubernetes label: empty, or at most 63
+                        alphanumeric characters, '-', '_' or '.', starting and ending with an
+                        alphanumeric character.
+                      maxLength: 63
+                      pattern: ^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$
                       type: string
-                    description: labels to add on top of system-managed labels.
+                    description: |-
+                      labels to add on top of system-managed labels. Keys and values must
+                      be valid Kubernetes label keys and values.
+                    maxProperties: 32
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'label keys must be valid Kubernetes label keys: an
+                        optional lower-case DNS subdomain prefix and ''/'', then at
+                        most 63 alphanumeric characters, ''-'', ''_'' or ''.'', starting
+                        and ending with an alphanumeric character'
+                      rule: self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$')
+                        && k.indexOf('/') <= 253)
+                    - message: label keys under pgpilot.io/ are reserved for the operator
+                      rule: '!self.exists(k, k.startsWith(''pgpilot.io/''))'
                 type: object
               sinks:
                 description: |-
@@ -382,7 +522,11 @@ spec:
                         description: enabled toggles the sink.
                         type: boolean
                       endpoint:
-                        description: endpoint is the host:port of the gRPC Receiver.
+                        description: |-
+                          endpoint is the host:port of the gRPC Receiver. Required when the
+                          sink is enabled.
+                        maxLength: 512
+                        pattern: ^\S*$
                         type: string
                       tls:
                         description: |-
@@ -398,10 +542,17 @@ spec:
                     required:
                     - enabled
                     type: object
+                    x-kubernetes-validations:
+                    - message: endpoint is required when the gRPC sink is enabled
+                      rule: '!self.enabled || (has(self.endpoint) && size(self.endpoint)
+                        > 0)'
                   prometheus:
+                    default:
+                      enabled: true
                     description: |-
                       prometheus configures the pull-based Prometheus sink (pgwatch
-                      exposes /metrics on the pod).
+                      exposes /metrics on the pod). It is enabled when the field is left
+                      out; set `enabled: false` to run with the gRPC sink only.
                     properties:
                       enabled:
                         default: true
@@ -418,6 +569,10 @@ spec:
                     - enabled
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: at least one sink must be enabled
+                  rule: (has(self.prometheus) && self.prometheus.enabled) || (has(self.grpc)
+                    && self.grpc.enabled)
             required:
             - database
             - metrics
@@ -516,7 +671,8 @@ spec:
               ready:
                 description: |-
                   ready is true when the underlying pgwatch Pod is Running and has
-                  passed its readiness probe.
+                  passed its readiness probe. It is always written, so `false` shows
+                  up in `kubectl get` instead of an empty column.
                 type: boolean
             type: object
         required:

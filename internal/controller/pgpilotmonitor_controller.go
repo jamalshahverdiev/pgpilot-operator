@@ -80,21 +80,15 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Handle deletion via finalizer.
 	if !monitor.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&monitor, finalizerName) {
-			controllerutil.RemoveFinalizer(&monitor, finalizerName)
-			if err := r.Update(ctx, &monitor); err != nil {
-				return ctrl.Result{}, err
-			}
+		if err := r.patchFinalizer(ctx, &monitor, controllerutil.RemoveFinalizer); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
 	}
 
 	// Ensure finalizer is set.
-	if !controllerutil.ContainsFinalizer(&monitor, finalizerName) {
-		controllerutil.AddFinalizer(&monitor, finalizerName)
-		if err := r.Update(ctx, &monitor); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.patchFinalizer(ctx, &monitor, controllerutil.AddFinalizer); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// --- Step 1: Validate credentials source. ---
@@ -211,6 +205,31 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// patchFinalizer adds or removes the operator's finalizer with a patch that
+// carries metadata.finalizers and nothing else.
+//
+// It must not be a full Update of the object. An Update sends the spec back
+// as the Go struct serialises it: optional structs turn into `{}` (which the
+// API server then fills with defaults, so the operator ends up owning fields
+// the user never set and the generation moves), and explicit zero values such
+// as `endpoint: ""` are dropped. To the API server that is a changed spec, so
+// every validation rule is evaluated again - and an object stored before a
+// rule existed could no longer lose its finalizer, leaving it stuck in
+// Terminating.
+func (r *PgpilotMonitorReconciler) patchFinalizer(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+	change func(client.Object, string) bool,
+) error {
+	base := monitor.DeepCopy()
+	if !change(monitor, finalizerName) {
+		return nil
+	}
+	// The optimistic lock makes a concurrent change to the finalizer list
+	// surface as a conflict (and a retry) instead of being overwritten.
+	return r.Patch(ctx, monitor, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // validateCredentials checks that PgpilotMonitor has a usable credentials

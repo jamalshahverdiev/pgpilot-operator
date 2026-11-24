@@ -15,7 +15,7 @@ func BuildService(monitor *pgpilotv1.PgpilotMonitor) *corev1.Service {
 	sysLabels := SystemLabels(monitor.Name)
 	port := prometheusPort(monitor)
 
-	svcLabels := MergeLabels(sysLabels, monitor.Spec.ServiceMetadata.Labels)
+	svcLabels := MergeLabels(sysLabels, monitor.Spec.ServiceMetadata.LabelMap())
 	svcAnnotations := MergeAnnotations(nil, monitor.Spec.ServiceMetadata.Annotations)
 
 	svc := &corev1.Service{

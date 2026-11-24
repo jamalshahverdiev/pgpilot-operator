@@ -51,8 +51,13 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.username) || has(self.password)",message="password is required when username is set inline"
 // +kubebuilder:validation:XValidation:rule="!has(self.password) || has(self.username)",message="username is required when password is set inline"
 type DatabaseRef struct {
-	// host of the PostgreSQL server (DNS name or IP).
+	// host of the PostgreSQL server: a DNS name, an IPv4 address or an IPv6
+	// address (with or without square brackets). The port goes into `port`,
+	// not here, and characters that have a meaning in a connection URL are
+	// not accepted.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9._-]+|\[?[0-9A-Fa-f]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]?)$`
 	Host string `json:"host"`
 
 	// port of the PostgreSQL server.
@@ -63,7 +68,9 @@ type DatabaseRef struct {
 	Port int32 `json:"port,omitempty"`
 
 	// database is the logical database name pgwatch connects to.
+	// PostgreSQL limits identifiers to 63 bytes.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	Database string `json:"database"`
 
 	// sslmode selects TLS behaviour (libpq sslmode semantics).
@@ -92,6 +99,15 @@ type DatabaseRef struct {
 	// customTags are added to every measurement as additional labels.
 	// Useful for `env`, `team`, `tier`, etc. Passed through to pgwatch
 	// source configuration verbatim.
+	//
+	// Keys become label names. On the Prometheus sink a character outside
+	// `[a-zA-Z0-9_]` is exported as `_` (`team-name` becomes `team_name`),
+	// so prefer plain label names. Three kinds of key cannot work and are
+	// rejected: an empty key, a key starting with `__` (reserved by
+	// Prometheus; pgwatch then fails to export every series of the
+	// database) and `dbname`, which pgwatch sets to the monitor name.
+	// +kubebuilder:validation:MaxProperties=32
+	// +kubebuilder:validation:XValidation:rule="self.all(k, size(k) > 0 && !k.startsWith('__') && k != 'dbname')",message="customTags keys must not be empty, must not start with __ and must not be dbname"
 	// +optional
 	CustomTags map[string]string `json:"customTags,omitempty"`
 }
@@ -107,12 +123,16 @@ type CredentialsSecretRef struct {
 	// usernameKey is the key inside the Secret containing the database
 	// username. Defaults to "username".
 	// +kubebuilder:default=username
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]*$`
 	// +optional
 	UsernameKey string `json:"usernameKey,omitempty"`
 
 	// passwordKey is the key inside the Secret containing the database
 	// password. Defaults to "password".
 	// +kubebuilder:default=password
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]*$`
 	// +optional
 	PasswordKey string `json:"passwordKey,omitempty"`
 }
@@ -124,21 +144,33 @@ type CredentialsSecretRef struct {
 //  2. all metrics from every referenced PgpilotMetricLibrary,
 //  3. every inline custom metric.
 //
-// Later entries override earlier ones by metric name.
+// Later entries override earlier ones by metric name. At least one of the
+// three has to be set: a monitor without metrics collects nothing.
+// +kubebuilder:validation:XValidation:rule="(has(self.preset) && size(self.preset) > 0) || (has(self.fromLibraries) && size(self.fromLibraries) > 0) || (has(self.custom) && size(self.custom) > 0)",message="at least one of preset, fromLibraries or custom must be set"
 type MetricsSpec struct {
 	// preset is the name of a pgwatch built-in preset (e.g. "basic",
 	// "standard", "exhaustive", "recommendations", "rds", "aurora").
 	// Leave empty to rely entirely on libraries and custom metrics.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^([a-z][a-z0-9_]*)?$`
 	// +optional
 	Preset string `json:"preset,omitempty"`
 
 	// fromLibraries references PgpilotMetricLibrary CRs in the same
-	// namespace whose metrics should be included.
+	// namespace whose metrics should be included. A library can be listed
+	// only once.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.name == x.name))",message="a library can be listed only once"
+	// +listType=atomic
 	// +optional
 	FromLibraries []LibraryRef `json:"fromLibraries,omitempty"`
 
 	// custom is an inline list of metric definitions. Prefer libraries for
-	// anything reused across monitors.
+	// anything reused across monitors. Metric names must be unique within
+	// the list.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.name == x.name))",message="metric names must be unique"
+	// +listType=atomic
 	// +optional
 	Custom []MetricDefinition `json:"custom,omitempty"`
 }
@@ -148,14 +180,18 @@ type MetricsSpec struct {
 type LibraryRef struct {
 	// name of the PgpilotMetricLibrary.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 }
 
 // SinksSpec configures where pgwatch ships measurements. At least one sink
-// should be enabled — the operator rejects configurations where none are.
+// has to be enabled: pgwatch refuses to start without one.
+// +kubebuilder:validation:XValidation:rule="(has(self.prometheus) && self.prometheus.enabled) || (has(self.grpc) && self.grpc.enabled)",message="at least one sink must be enabled"
 type SinksSpec struct {
 	// prometheus configures the pull-based Prometheus sink (pgwatch
-	// exposes /metrics on the pod).
+	// exposes /metrics on the pod). It is enabled when the field is left
+	// out; set `enabled: false` to run with the gRPC sink only.
+	// +kubebuilder:default={enabled:true}
 	// +optional
 	Prometheus *PrometheusSink `json:"prometheus,omitempty"`
 
@@ -183,12 +219,16 @@ type PrometheusSink struct {
 
 // GRPCSink streams every measurement to a remote Receiver implementing the
 // pgwatch gRPC protocol.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.endpoint) && size(self.endpoint) > 0)",message="endpoint is required when the gRPC sink is enabled"
 type GRPCSink struct {
 	// enabled toggles the sink.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 
-	// endpoint is the host:port of the gRPC Receiver.
+	// endpoint is the host:port of the gRPC Receiver. Required when the
+	// sink is enabled.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^\S*$`
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
@@ -226,16 +266,46 @@ type ImageSpec struct {
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
 }
 
-// ObjectMetadataOverrides holds labels and annotations the operator merges
-// onto a generated resource. System-managed keys — those under
-// `app.kubernetes.io/*` and `pgpilot.io/*` — always win and cannot be
-// overridden by users.
-type ObjectMetadataOverrides struct {
-	// labels to add on top of system-managed labels.
-	// +optional
-	Labels map[string]string `json:"labels,omitempty"`
+// LabelValue is the value of a Kubernetes label: empty, or at most 63
+// alphanumeric characters, '-', '_' or '.', starting and ending with an
+// alphanumeric character.
+// +kubebuilder:validation:MaxLength=63
+// +kubebuilder:validation:Pattern=`^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$`
+type LabelValue string
 
-	// annotations to add on top of system-managed annotations.
+// LabelMap returns the labels as the plain string map Kubernetes objects use.
+// It returns nil when no labels are set.
+func (o ObjectMetadataOverrides) LabelMap() map[string]string {
+	if o.Labels == nil {
+		return nil
+	}
+	out := make(map[string]string, len(o.Labels))
+	for k, v := range o.Labels {
+		out[k] = string(v)
+	}
+	return out
+}
+
+// ObjectMetadataOverrides holds labels and annotations the operator merges
+// onto a generated resource.
+//
+// The labels and annotations the operator sets itself always win over a
+// user-supplied entry with the same key. Keys under `pgpilot.io/` are
+// reserved for the operator and are rejected.
+type ObjectMetadataOverrides struct {
+	// labels to add on top of system-managed labels. Keys and values must
+	// be valid Kubernetes label keys and values.
+	// +kubebuilder:validation:MaxProperties=32
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$') && k.indexOf('/') <= 253)",message="label keys must be valid Kubernetes label keys: an optional lower-case DNS subdomain prefix and '/', then at most 63 alphanumeric characters, '-', '_' or '.', starting and ending with an alphanumeric character"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.startsWith('pgpilot.io/'))",message="label keys under pgpilot.io/ are reserved for the operator"
+	// +optional
+	Labels map[string]LabelValue `json:"labels,omitempty"`
+
+	// annotations to add on top of system-managed annotations. Keys must be
+	// valid Kubernetes annotation keys.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$') && k.indexOf('/') <= 253)",message="annotation keys must be valid Kubernetes annotation keys: an optional DNS subdomain prefix and '/', then at most 63 alphanumeric characters, '-', '_' or '.', starting and ending with an alphanumeric character"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.startsWith('pgpilot.io/'))",message="annotation keys under pgpilot.io/ are reserved for the operator"
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
@@ -278,9 +348,10 @@ type PgpilotMonitorSpec struct {
 // PgpilotMonitorStatus is the observed state of a PgpilotMonitor.
 type PgpilotMonitorStatus struct {
 	// ready is true when the underlying pgwatch Pod is Running and has
-	// passed its readiness probe.
+	// passed its readiness probe. It is always written, so `false` shows
+	// up in `kubectl get` instead of an empty column.
 	// +optional
-	Ready bool `json:"ready,omitempty"`
+	Ready bool `json:"ready"`
 
 	// podName is the name of the currently-running pgwatch Pod, if any.
 	// +optional
@@ -326,6 +397,16 @@ type PgpilotMonitorStatus struct {
 // collector against the described PostgreSQL database and expose its
 // metrics via the configured sinks. It is namespace-scoped and users may
 // create any number of them in any namespace.
+//
+// The name is used to derive the names of the generated Service, Deployment
+// and ConfigMap ("pgpilot-<name>") and as a label value. Keep it to at most
+// 55 characters without dots; with a longer or dotted name the Service cannot
+// be created.
+//
+// This is deliberately not a validation rule on the object: a rule on
+// metadata.name is evaluated on every update, the name can never be changed,
+// and so a monitor that already exists with such a name could no longer be
+// updated at all - not even to remove its finalizer when it is deleted.
 type PgpilotMonitor struct {
 	metav1.TypeMeta `json:",inline"`
 
