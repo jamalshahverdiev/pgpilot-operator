@@ -364,10 +364,8 @@ func (r *PgpilotMonitorReconciler) libraryToMonitors(
 		for _, ref := range m.Spec.Metrics.FromLibraries {
 			if ref.Name == lib.Name {
 				requests = append(requests, reconcile.Request{
-					NamespacedName: types.NamespacedName{
-						Name:      m.Name,
-						Namespace: m.Namespace,
-					},
+					Name:      m.Name,
+					Namespace: m.Namespace,
 				})
 				break
 			}

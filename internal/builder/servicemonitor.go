@@ -15,12 +15,10 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 	sysLabels := SystemLabels(monitor.Name)
 
 	return &monitoringv1.ServiceMonitor{
-		TypeMeta: metav1.TypeMeta{APIVersion: "monitoring.coreos.com/v1", Kind: "ServiceMonitor"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: monitor.Namespace,
-			Labels:    MergeLabels(sysLabels, monitor.Spec.ServiceMetadata.Labels),
-		},
+		APIVersion: "monitoring.coreos.com/v1", Kind: "ServiceMonitor",
+		Name:      name,
+		Namespace: monitor.Namespace,
+		Labels:    MergeLabels(sysLabels, monitor.Spec.ServiceMetadata.Labels),
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
@@ -33,7 +31,7 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
-					Port:          "metrics",
+					Port:          metricsPortName,
 					Interval:      monitoringv1.Duration("30s"),
 					ScrapeTimeout: monitoringv1.Duration("10s"),
 				},

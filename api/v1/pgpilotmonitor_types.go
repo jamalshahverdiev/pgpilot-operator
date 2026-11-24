@@ -19,6 +19,7 @@ package v1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // SSLMode describes the TLS policy pgwatch uses when connecting to the target
@@ -351,5 +352,8 @@ type PgpilotMonitorList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&PgpilotMonitor{}, &PgpilotMonitorList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &PgpilotMonitor{}, &PgpilotMonitorList{})
+		return nil
+	})
 }

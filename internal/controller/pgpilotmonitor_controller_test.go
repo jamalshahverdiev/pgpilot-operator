@@ -48,17 +48,13 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 
 	BeforeEach(func() {
 		ns = &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "test-ns-",
-			},
+			GenerateName: "test-ns-",
 		}
 		Expect(k8sClient.Create(context.TODO(), ns)).To(Succeed())
 
 		secret = &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "db-creds",
-				Namespace: ns.Name,
-			},
+			Name:      "db-creds",
+			Namespace: ns.Name,
 			StringData: map[string]string{
 				"username": "pgwatch",
 				"password": "secret",
@@ -67,10 +63,8 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		Expect(k8sClient.Create(context.TODO(), secret)).To(Succeed())
 
 		monitor = &pgpilotv1.PgpilotMonitor{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-db",
-				Namespace: ns.Name,
-			},
+			Name:      "test-db",
+			Namespace: ns.Name,
 			Spec: pgpilotv1.PgpilotMonitorSpec{
 				Database: pgpilotv1.DatabaseRef{
 					Host:     "pg.example.com",

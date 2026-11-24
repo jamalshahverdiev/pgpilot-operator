@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
 
@@ -18,10 +16,8 @@ const (
 
 func newTestMonitor() *pgpilotv1.PgpilotMonitor {
 	return &pgpilotv1.PgpilotMonitor{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testMonitorName,
-			Namespace: testMonitorNS,
-		},
+		Name:      testMonitorName,
+		Namespace: testMonitorNS,
 		Spec: pgpilotv1.PgpilotMonitorSpec{
 			Database: pgpilotv1.DatabaseRef{
 				Host:     "pg.example.com",

@@ -17,6 +17,10 @@ const (
 	configMountPath  = "/etc/pgwatch"
 	containerName    = "pgwatch"
 
+	// metricsPortName names the Prometheus sink port on the container. The
+	// Service and the ServiceMonitor refer to the port by this name.
+	metricsPortName = "metrics"
+
 	// webDisableArg turns off pgwatch's built-in web UI and REST API, which
 	// otherwise listen on 0.0.0.0:8080 in every collector pod without
 	// authentication. Its /test-connect endpoint opens a connection to a
@@ -50,12 +54,10 @@ func BuildDeployment(
 	promPort := prometheusPort(monitor)
 
 	dep := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: monitor.Namespace,
-			Labels:    sysLabels,
-		},
+		APIVersion: "apps/v1", Kind: "Deployment",
+		Name:      name,
+		Namespace: monitor.Namespace,
+		Labels:    sysLabels,
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To[int32](1),
 			Selector: &metav1.LabelSelector{
@@ -78,7 +80,7 @@ func BuildDeployment(
 							Env:   envVars,
 							Ports: []corev1.ContainerPort{
 								{
-									Name:          "metrics",
+									Name:          metricsPortName,
 									ContainerPort: promPort,
 									Protocol:      corev1.ProtocolTCP,
 								},
@@ -87,10 +89,10 @@ func BuildDeployment(
 							LivenessProbe:  tcpProbe(promPort, 15, 20),
 							ReadinessProbe: tcpProbe(promPort, 5, 10),
 							SecurityContext: &corev1.SecurityContext{
-								RunAsNonRoot:             ptr.To(true),
+								RunAsNonRoot:             new(true),
 								RunAsUser:                ptr.To[int64](65534),
-								ReadOnlyRootFilesystem:   ptr.To(true),
-								AllowPrivilegeEscalation: ptr.To(false),
+								ReadOnlyRootFilesystem:   new(true),
+								AllowPrivilegeEscalation: new(false),
 								Capabilities: &corev1.Capabilities{
 									Drop: []corev1.Capability{"ALL"},
 								},
@@ -111,23 +113,17 @@ func BuildDeployment(
 					Volumes: []corev1.Volume{
 						{
 							Name: configVolumeName,
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: name + "-config",
-									},
-								},
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								Name: name + "-config",
 							},
 						},
 						{
-							Name: "tmp",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
+							Name:     "tmp",
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
 						},
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: ptr.To(true),
+						RunAsNonRoot: new(true),
 					},
 				},
 			},
@@ -192,8 +188,8 @@ func buildEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
 			Name: "PGUSER",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secret.Name},
-					Key:                  usernameKey,
+					Name: secret.Name,
+					Key:  usernameKey,
 				},
 			},
 		},
@@ -201,8 +197,8 @@ func buildEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
 			Name: "PGPASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secret.Name},
-					Key:                  passwordKey,
+					Name: secret.Name,
+					Key:  passwordKey,
 				},
 			},
 		},
@@ -237,10 +233,8 @@ func prometheusPort(monitor *pgpilotv1.PgpilotMonitor) int32 {
 // process is alive and accepting connections.
 func tcpProbe(port int32, initialDelay, period int32) *corev1.Probe {
 	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt32(port),
-			},
+		TCPSocket: &corev1.TCPSocketAction{
+			Port: intstr.FromInt32(port),
 		},
 		InitialDelaySeconds: initialDelay,
 		PeriodSeconds:       period,

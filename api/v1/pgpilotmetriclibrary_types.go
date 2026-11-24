@@ -18,6 +18,7 @@ package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // MetricDefinition describes one pgwatch SQL metric. It is the unit shared
@@ -134,5 +135,8 @@ type PgpilotMetricLibraryList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&PgpilotMetricLibrary{}, &PgpilotMetricLibraryList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &PgpilotMetricLibrary{}, &PgpilotMetricLibraryList{})
+		return nil
+	})
 }

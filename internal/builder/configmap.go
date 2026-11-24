@@ -7,7 +7,6 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
 	yamlv3 "gopkg.in/yaml.v3"
@@ -54,13 +53,11 @@ func BuildConfigMap(
 	hash := contentHash(data)
 
 	cm := &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName(monitor.Name) + "-config",
-			Namespace: monitor.Namespace,
-			Labels:    SystemLabels(monitor.Name),
-		},
-		Data: data,
+		APIVersion: "v1", Kind: "ConfigMap",
+		Name:      ResourceName(monitor.Name) + "-config",
+		Namespace: monitor.Namespace,
+		Labels:    SystemLabels(monitor.Name),
+		Data:      data,
 	}
 
 	return cm, hash, nil
