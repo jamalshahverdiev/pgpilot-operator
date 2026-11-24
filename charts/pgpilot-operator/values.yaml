@@ -58,6 +58,16 @@ metrics:
 healthProbe:
   bindAddress: ":8081"
 
+migrations:
+  # Operator releases up to v1.0.2 wrote the pgwatch image tag of the time
+  # (5.1.0) into the spec of every monitor they reconciled, which would keep
+  # those monitors on that version for good. With this on, the operator
+  # removes that tag once at start, and only where the API server's record
+  # shows no other writer for it. To keep 5.1.0 on one monitor, annotate it
+  # with pgpilot.io/keep-image-tag: "true" before upgrading; turn this off to
+  # leave every stored tag as it is.
+  storedImageTag: true
+
 credentials:
   # How often the Secret referenced by a PgpilotMonitor is read again. The
   # operator does not watch Secrets; a changed Secret is noticed at the next

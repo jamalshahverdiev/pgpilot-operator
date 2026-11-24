@@ -2,6 +2,134 @@
 
 ## Unreleased
 
+### pgwatch 6.2.0
+
+Collectors now run pgwatch 6.2.0 instead of 5.1.0, and the metric definitions
+the operator hands to them are those of the same release (78 metrics and 17
+presets instead of 74 and 15).
+
+- The default image tag is no longer part of the CRD. `spec.image.repository`
+  and `spec.image.tag` have no schema default any more; the operator fills them
+  in when it builds the pod and does not write them into the object. A monitor
+  that leaves the tag unset follows the operator from now on, and one that sets
+  it keeps it.
+- Operator releases up to v1.0.2 wrote `image: {repository:
+  cybertecpostgresql/pgwatch, tag: "5.1.0"}` into every monitor they
+  reconciled, which would keep all existing monitors on 5.1.0. When it starts,
+  the operator removes that tag again, once, and records an
+  `ImageDefaultRestored` event on the monitor. It goes by the record the API
+  server keeps of who wrote each field (`managedFields`) and removes the tag
+  only where that record shows no writer but the old operator. See "Which
+  monitors move to 6.2.0" below for what it leaves alone and how to keep 5.1.0
+  on purpose. `--migrate-stored-image-tag=false`
+  (`migrations.storedImageTag: false` in the chart) turns it off.
+- `spec.metrics.preset` is checked against pgwatch's presets, also when it is
+  used without custom metrics. A name that is not a preset, and pgwatch's
+  presets for other kinds of sources (`patroni`, `pgbouncer`, `pgpool`), used
+  to give a collector that ran, looked healthy and collected nothing. Such a
+  monitor now gets `Ready=False` / `ConfigGenerated=False` with reason
+  `InvalidPreset`, a message listing the usable presets, and a warning event.
+- The operator's writes are recorded by the API server under the field manager
+  `pgpilot-operator` instead of `manager`.
+- The copy of pgwatch's metric definitions in the operator comes with pgwatch's
+  licence (BSD 3-Clause), in the source tree and in the image (`/licenses`).
+  `make update-pgwatch-registry PGWATCH_VERSION=x.y.z` fetches the definitions
+  of another release; `make test-collector` runs the generated configuration
+  against the real pgwatch image and a PostgreSQL container, and CI does so for
+  PostgreSQL 14, 18 and 19.
+
+Upgrade notes:
+
+- **Every collector pod is replaced once**, with the new image, the new metric
+  definitions, or both. The new image has to be pullable:
+  `cybertecpostgresql/pgwatch:6.2.0`. Where it is not (air-gapped clusters,
+  mirrors), the new pod stays in `ImagePullBackOff` and the old one keeps
+  collecting until the image is available.
+- **Upgrade the CRDs together with the operator.** The old CRD defaults
+  `spec.image.tag` to 5.1.0 and puts it back as fast as it is removed. The
+  operator notices (`the installed PgpilotMonitor CRD still defaults
+  spec.image.tag` in its log), retries for a few minutes and then waits for
+  its next start. The Helm chart and `dist/install.yaml` update both at once.
+- **Which monitors move to 6.2.0**: those without `spec.image.tag`, and those
+  whose tag 5.1.0 nobody but an earlier operator release wrote (or nobody at
+  all: a default the old CRD filled in). The operator leaves a tag alone, and
+  names the monitor in its log at start, when
+
+  - another writer owns the field: a tag you set when creating the monitor, or
+    set, changed or applied later with a different value, or with server-side
+    apply (Flux, `kubectl apply --server-side`),
+  - the manifest last applied with `kubectl apply` (which is also what Argo CD
+    uses by default) contains a tag,
+  - the monitor has its own `spec.image.repository`,
+  - the object carries no ownership record (restored from a backup without
+    `managedFields`).
+
+  One case cannot be told apart: writing `tag: "5.1.0"` over the identical
+  value the old operator had already stored - with `kubectl patch`, `kubectl
+  edit`, `kubectl replace` or a Helm upgrade - changes nothing in the object,
+  and the API server keeps no trace of it. Such a tag is taken for the old
+  operator's and removed. **To keep 5.1.0 on a monitor on purpose, annotate it
+  before upgrading:**
+
+  ```bash
+  kubectl annotate pgpilotmonitor <name> -n <namespace> pgpilot.io/keep-image-tag=true
+  ```
+
+  The same applies to monitors created by another controller whose binary is
+  called `manager`. To see what is left on the old tag after the upgrade, and
+  to move a monitor by hand:
+
+  ```bash
+  kubectl get pgpilotmonitors -A \
+    -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,REPOSITORY:.spec.image.repository,TAG:.spec.image.tag'
+  kubectl patch pgpilotmonitor <name> -n <namespace> --type=json \
+    -p '[{"op":"remove","path":"/spec/image/tag"}]'
+  ```
+
+  On Kubernetes 1.28 and 1.29 a monitor that also breaks one of the validation
+  rules introduced in this release cannot be changed at all until its spec is
+  corrected (see the table under "Validation"); that includes removing the
+  tag, by the operator or by hand.
+
+- **Monitors that stay on pgwatch 5.x** still receive the 6.2.0 metric
+  definitions when they use a preset; the operator has one copy. pgwatch 5.1.0
+  runs with them, but collects the 6.2.0 preset contents (see the next point)
+  and logs `no SQL found for metric version` once per interval for
+  `checkpointer` on PostgreSQL 14-16 and for the PostgreSQL 19 metrics. Staying
+  on 5.x is meant as a short-term measure.
+- **Series that change name or meaning.** Check dashboards and alert rules:
+
+  | Before | With pgwatch 6.2.0 |
+  |--------|--------------------|
+  | `pgwatch_settings_<setting>` (presets `exhaustive`, `exhaustive_no_python`, `full`, `rds`, `aurora`, `azure`, `gce`, `aiven`, `debug`) | `pgwatch_settings_num_value{name="<setting>"}`, for every numeric setting. `pgwatch_settings_max_connections` becomes `pgwatch_settings_num_value{name="max_connections"}` |
+  | `pgwatch_recommendations_duplicate_count` | `pgwatch_recommendations_affected_count`, now also present (value 1) for unused and invalid indexes |
+  | `pgwatch_backends_longest_*_seconds` in whole seconds, rounded up | fractional seconds |
+  | `pgwatch_backends_total`, `_active`, `_idle` include the collector's other sessions | the collector holds one session, so the counts are 2-3 lower per monitor; the `longest_*`, `avg_*` and `max_xmin_age_tx` series are absent while no other session exists in the database |
+  | `NaN` and `Inf` values of float columns are exported | the sample is left out |
+  | label and metric names with characters outside `[a-zA-Z0-9_]` (custom tag keys, `tag_` columns, column names of custom metrics) are exported verbatim to Prometheus 3.4 and newer | exported with `_`, as they always were to Prometheus 2.x. Prometheus 3.0-3.3 gets the verbatim names from both versions |
+
+  The dashboard in `examples/grafana` uses none of the renamed series.
+- **Slow metric queries are cancelled.** pgwatch 6 fetches all metrics of a
+  monitor with one worker, those due at the same moment in one batch. The
+  batch has 30 seconds (or the greatest common divisor of the monitor's
+  intervals, if that is longer); what has not finished is cancelled and tried
+  again alone, with the metric's own interval (at least 30 seconds) as limit.
+  pgwatch 5 let a query run and delivered late. A custom metric slower than
+  the second limit stops producing data, and every slow query delays the other
+  metrics of the same monitor while it runs. See "Query time" in
+  docs/crd-reference.md. `statementTimeoutSeconds` is still ignored.
+- **Failing metrics are logged every time**, not once in ten minutes: a
+  monitor on preset `standard`, `exhaustive` or `full` without pgwatch's
+  PL/Python helpers, or any preset with `stat_statements` without the
+  `pg_stat_statements` extension, logs an error per interval for those metrics.
+  `exhaustive_no_python` avoids the first.
+- **TLS connections** (`sslmode` other than `disable`) use SCRAM channel
+  binding when the server offers it; nothing to configure.
+- PostgreSQL 14 remains the oldest version with built-in metrics; PostgreSQL 19
+  is supported, with three metrics of its own (`autovacuum_scores`, `recovery`,
+  `stat_lock`). Two metrics of preset `debug` (`subscription_stats`,
+  `table_stats_approx`) fail on PostgreSQL 19 with pgwatch 6.2.0's own SQL.
+
 ### Validation
 
 The API server now rejects objects the operator cannot run. These were accepted

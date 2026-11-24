@@ -91,6 +91,118 @@ and at the `pgwatch_instance_up` metric (`0` while the database cannot be
 reached). Usual causes: wrong host or port, a wrong password, a `sslmode` the
 server does not support, a network policy or firewall in between.
 
+The first line pgwatch logs for a source tells which case it is:
+
+- `Connect OK. Version: PostgreSQL ...` - connected and logged in.
+- `could not init connection, retrying on next iteration` followed by the
+  server's error (`password authentication failed`, `no such host`, `connection
+  refused`, ...) - it cannot connect; fix what the error names. When the
+  password comes from a Secret, the operator replaces the pod once the Secret
+  changes.
+
+## Some metrics are missing, late or arrive in bursts
+
+With pgwatch 6 all metrics of a monitor are fetched by one worker, the ones due
+at the same time in one batch. A metric whose query fails or runs too long is
+taken out of the batch and tried on its own. In the pod log:
+
+- `failed to fetch metric` / `degraded metric fetch failed` with the server's
+  error - the query itself fails. The usual reasons are a missing extension
+  (`relation "pg_stat_statements" does not exist`), a missing helper function
+  (`cpu_load` and the `psutil_*` metrics in presets `standard`, `exhaustive`
+  and `full`; use `exhaustive_no_python` or install pgwatch's helpers), or a
+  monitoring role without `pg_monitor`. pgwatch 6 logs this on every attempt,
+  not once in a while as pgwatch 5 did.
+- `metric degraded after repeated failures, switching to individual fetch` -
+  the metric is from now on fetched alone.
+- `timeout: context deadline exceeded` - the queries ran longer than pgwatch
+  allows. The metrics due at the same moment share one limit: 30 seconds, or
+  the greatest common divisor of the monitor's intervals if that is longer.
+  What has not finished by then is cancelled on the server (`canceling
+  statement due to user request` in the PostgreSQL log) and tried again alone,
+  this time with the metric's own interval (at least 30 seconds) as limit. A
+  query slower than the first limit thus runs twice at every collection; one
+  slower than the second never yields data.
+
+While a slow query runs, every other metric of the monitor waits, including
+`pgwatch_instance_up`. A slow custom metric can thus make all series of its
+monitor arrive late. Set `statement_timeout` (and `lock_timeout`) on the
+monitoring role, make the query cheaper, or move it into a PgpilotMonitor of
+its own; see [query time](crd-reference.md#query-time).
+
+A metric that is simply not defined for the server's PostgreSQL version is
+skipped and writes no line of its own. With pgwatch 6.2.0 its name can still
+show up in the `metric` field of a `failed to fetch metric` line that reports
+another metric's error; the metric that really failed is the one named in the
+error text (`fetch <metric>: ...`).
+
+## Monitor reports InvalidPreset
+
+`Ready: False` and `ConfigGenerated: False` with reason `InvalidPreset` mean
+that `spec.metrics.preset` is not a preset the collector can gather from a
+PostgreSQL database: a misspelt name, or one of pgwatch's presets for other
+kinds of sources (`patroni`, `pgbouncer`, `pgpool`). The condition message and
+the warning event list the names that can be used. (A name with characters
+other than lower-case letters, digits and `_`, such as `exhaustive-no-python`,
+does not get this far: the API server refuses it when the object is written.)
+
+Nothing is generated for such a monitor. If it had a collector before the
+change, that collector keeps running with its last valid configuration until
+the preset is corrected, and the operator does not look at the monitor again
+until then: a rotated credentials Secret, for instance, does not reach that
+collector.
+
+## Collector still runs an old pgwatch after an operator upgrade
+
+```bash
+kubectl get deployments -A -l app.kubernetes.io/managed-by=pgpilot-operator \
+  -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image'
+kubectl get pgpilotmonitors -A \
+  -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,REPOSITORY:.spec.image.repository,TAG:.spec.image.tag'
+```
+
+A monitor follows the operator's pgwatch release only while `spec.image.tag` is
+unset. Operator releases up to v1.0.2 wrote `tag: "5.1.0"` into every monitor
+they reconciled; the current operator removes that tag when it starts (an
+`ImageDefaultRestored` event is recorded on the monitor), but only where the
+API server's record of who wrote the field (`managedFields`) shows no writer
+other than the old operator. It leaves the tag alone when
+
+- another writer owns it: the tag was set when the monitor was created, or
+  set to another value later, or applied with server-side apply,
+- the manifest last applied with `kubectl apply` contains a tag,
+- the monitor is annotated `pgpilot.io/keep-image-tag: "true"`,
+- the monitor uses another `spec.image.repository` (a mirror may not have the
+  newer release),
+- the object has no ownership record (restored from a backup, for example),
+- the operator runs with `--migrate-stored-image-tag=false`
+  (`migrations.storedImageTag: false` in the Helm chart).
+
+At start the operator logs which monitors with tag 5.1.0 it left alone, and
+why (`monitors with image tag 5.1.0 were left as they are`). Two messages in
+the same place point at something to fix first:
+
+- `the installed PgpilotMonitor CRD still defaults spec.image.tag` - the CRDs
+  are older than the operator; the old CRD puts the tag back as soon as it is
+  removed. Upgrade the CRDs; the operator tries again at its next start.
+- `... is invalid` for a monitor - on Kubernetes 1.28 and 1.29 an object that
+  breaks a validation rule added since it was stored cannot be changed until
+  its spec is corrected.
+
+To move a monitor yourself, remove the tag:
+
+```bash
+kubectl patch pgpilotmonitor <name> -n <namespace> --type=json \
+  -p '[{"op":"remove","path":"/spec/image/tag"}]'
+```
+
+If the tag comes from a manifest in Git or a Helm values file, remove it there.
+
+A rollout that does not finish after the upgrade (`ImagePullBackOff` on the new
+pod while the old one keeps running) means the cluster cannot pull the new
+image; mirror `cybertecpostgresql/pgwatch:6.2.0` to where the old one came
+from.
+
 ## ConfigMap not updating after spec change
 
 The operator uses a content-hash annotation (`pgpilot.io/config-hash`) on the pod template to trigger rollouts. If the hash does not change, no rollout occurs.

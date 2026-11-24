@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"strings"
@@ -28,8 +29,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
@@ -241,4 +246,59 @@ func TestMonitorChanged(t *testing.T) {
 			t.Error("delete events must pass")
 		}
 	})
+}
+
+type migrationSourceStub struct {
+	reader   client.Reader
+	recorder record.EventRecorder
+	asked    string
+}
+
+func (s *migrationSourceStub) GetAPIReader() client.Reader { return s.reader }
+func (s *migrationSourceStub) GetEventRecorderFor(name string) record.EventRecorder {
+	s.asked = name
+	return s.recorder
+}
+
+func TestStoredImageMigration_IsBuiltFromTheManagerUnlessTurnedOff(t *testing.T) {
+	reader := fake.NewClientBuilder().Build()
+	var writtenAs []string
+	writer := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, opts ...client.PatchOption) error {
+			options := &client.PatchOptions{}
+			for _, o := range opts {
+				o.ApplyToPatch(options)
+			}
+			writtenAs = append(writtenAs, options.FieldManager)
+			return nil
+		},
+	}).Build()
+	src := &migrationSourceStub{reader: reader, recorder: record.NewFakeRecorder(1)}
+
+	migration := storedImageMigration(src, writer, Options{})
+	if migration == nil {
+		t.Fatal("the migration must run by default")
+	}
+	// Reading through the cache would never find anything to migrate: the
+	// cache holds no managedFields.
+	if migration.Reader != reader {
+		t.Error("the migration must read through the manager's API reader")
+	}
+	// It writes through the client it is given, under the operator's name:
+	// "manager", the name of the binary, is what it takes old writes for.
+	monitor := &pgpilotv1.PgpilotMonitor{}
+	monitor.Name, monitor.Namespace = "db", "team"
+	if err := migration.Client.Patch(context.Background(), monitor, client.RawPatch(types.JSONPatchType, []byte("[]"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(writtenAs) != 1 || writtenAs[0] != "pgpilot-operator" {
+		t.Errorf("the migration's write reached the given client as field manager %q, want one write as pgpilot-operator", writtenAs)
+	}
+	if migration.Recorder != src.recorder || src.asked == "" {
+		t.Error("the migration must record its events through the manager")
+	}
+
+	if storedImageMigration(src, writer, Options{KeepStoredImageTag: true}) != nil {
+		t.Error("KeepStoredImageTag must turn the migration off")
+	}
 }

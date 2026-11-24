@@ -52,3 +52,26 @@ jobs:
         with:
           name: coverage
           path: cover.out
+
+  # The generated configuration, run by the pgwatch release the operator
+  # deploys, against a real PostgreSQL. This is the job that tells whether a
+  # change to the builders or a new pgwatch version still collects metrics.
+  collector:
+    name: Real pgwatch collector
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest PostgreSQL pgwatch has metric definitions for, the last one
+        # before its PostgreSQL 19 definitions, and 19.
+        postgres: ["14", "18", "19"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run the collector tests
+        run: make test-collector COLLECTOR_TEST_POSTGRES=postgres:${{ matrix.postgres }}

@@ -118,16 +118,61 @@ automatically. **That helper is dev-only — kube-prometheus-stack is not
 a pgpilot-operator dependency**, it's just a convenient way to run through
 the full operator → Prometheus → Grafana path during development.
 
-## Available metrics
+## Choosing a preset
 
-pgwatch exposes metrics based on the selected preset. Examples:
+A preset is a named list of pgwatch metrics with their collection intervals.
+These are the presets of pgwatch 6.2.0, the release the operator runs by
+default:
 
-| Preset | Typical metrics |
-|--------|----------------|
-| `basic` | `db_size`, `db_stats`, `wal`, `backends` |
-| `standard` | basic + `table_stats`, `index_stats`, `stat_statements` |
-| `exhaustive` | standard + `locks`, `blocking_locks`, `replication`, `bloat`, `sequences` |
-| `rds` | tuned for AWS RDS (no WAL-related metrics) |
-| `aurora` | tuned for AWS Aurora |
+| Preset | Metrics | Collects |
+|--------|--------:|----------|
+| `minimal` | 2 | `instance_up` and `kpi`, one query with the key figures of the instance |
+| `basic` | 4 | `instance_up`, `db_size`, `db_stats`, `wal` |
+| `standard` | 11 | basic + `table_stats`, `index_stats`, `stat_statements`, `sproc_stats`, `sequence_health`, `cpu_load`, `autovacuum_scores` |
+| `exhaustive` | 32 | standard + `backends`, `locks`, `bgwriter`, `checkpointer`, `replication`, `replication_slots`, `archiver`, `wal_size`, `table_io_stats`, `table_bloat_approx_summary_sql`, `stat_activity`, `settings_num` and more |
+| `exhaustive_no_python` | 31 | exhaustive without `cpu_load` |
+| `full` | 48 | exhaustive + the `reco_*` recommendations, `kpi`, `stat_ssl`, `logical_subscriptions` and the `psutil_*` operating-system metrics |
+| `recommendations` | 8 | only the `reco_*` checks (missing or unused indexes, superusers, ...); rows appear only when there is something to report |
+| `rds`, `aurora`, `azure`, `gce`, `aiven` | 22-32 | exhaustive without what the managed service does not expose |
+| `debug` | 73 | everything, every 30 seconds; for development only |
 
-For the full list, see [pgwatch built-in metrics](https://github.com/cybertec-postgresql/pgwatch/blob/master/internal/metrics/metrics.yaml).
+Things to know before picking one:
+
+- `cpu_load` and the `psutil_*` metrics need PL/Python helper functions in the
+  monitored database, which the operator does not create. Where they are
+  missing the collector logs an error for these metrics on every attempt and
+  collects the rest. `exhaustive_no_python` is `exhaustive` without them and is
+  the better choice unless you install the helpers yourself.
+- `stat_statements` and `stat_statements_calls` need the `pg_stat_statements`
+  extension in the monitored database; `reco_add_index` (presets
+  `recommendations`, `full`, `aiven`) needs `pg_qualstats`. Without the
+  extension the metric fails and is logged like the helper-based ones.
+- The presets for managed services do not contain `instance_up`, so
+  `pgwatch_instance_up` is not exported with value `1` for them. Alert on a
+  series they do have going missing, for example
+  `absent(pgwatch_db_stats_numbackends{dbname="<monitor>"})`.
+- `autovacuum_scores`, `recovery` and `stat_lock` only have SQL for PostgreSQL
+  19 and newer; on older servers they are skipped.
+- Since pgwatch 6 the presets collect `settings_num` instead of `settings`:
+  one series `pgwatch_settings_num_value{name="<setting>"}` per numeric server
+  setting, instead of one series per setting
+  (`pgwatch_settings_max_connections`, ...).
+- pgwatch has more presets, for other kinds of sources: `patroni` and
+  `postgres-exporter-basic` for its Prometheus-scraping sources, `pgbouncer`
+  and `pgpool` for those poolers. They collect nothing from a PostgreSQL
+  database and cannot be used for a monitor (see
+  [presets](crd-reference.md#presets)).
+
+The exact contents are in the registry the operator embeds,
+[`internal/builder/pgwatchdata/metrics.yaml`](../internal/builder/pgwatchdata/metrics.yaml).
+Built-in SQL exists for PostgreSQL 14 and newer; an older server gets
+`instance_up` and little else.
+
+### How pgwatch 6 collects
+
+One worker per monitor fetches every metric that is due, over a single
+connection and in one batch. A monitor therefore normally holds one session in
+the monitored database (pgwatch 5 held up to four), and `pgwatch_backends_*` no
+longer counts the collector's own extra sessions. The flip side: a slow or
+lock-blocked metric query holds back every other metric of the same monitor,
+see [query time](crd-reference.md#query-time).

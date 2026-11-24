@@ -46,7 +46,7 @@ At least one of `preset`, `fromLibraries` or `custom` must be set.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `preset` | string | no* | | pgwatch built-in preset (`basic`, `standard`, `exhaustive`, `rds`, `aurora`, etc.). Starts with a lower-case letter, then lower-case letters, digits and `_`; max 63 chars |
+| `preset` | string | no* | | pgwatch built-in preset, see [presets](#presets). Starts with a lower-case letter, then lower-case letters, digits and `_`; max 63 chars |
 | `fromLibraries` | []LibraryRef | no* | | References to PgpilotMetricLibrary CRs in the same namespace (`name`, max 253 chars). Each library at most once; max 32 |
 | `custom` | []MetricDefinition | no* | | Inline custom metrics (prefer libraries for shared metrics). Names must be unique; max 256 |
 
@@ -65,6 +65,24 @@ gives a Prometheus endpoint on port 9187. To use the gRPC sink alone, set
 | `grpc.endpoint` | string | when enabled | | gRPC receiver host:port, no whitespace, max 512 chars |
 | `grpc.tls.caSecretRef` | string | no | | Secret name with CA cert (key: `ca.crt`) |
 
+#### Presets
+
+The presets of pgwatch 6.2.0 that a monitor can use: `minimal`, `basic`,
+`standard`, `exhaustive`, `exhaustive_no_python`, `full`, `debug`,
+`recommendations`, and for managed services `rds`, `aurora`, `azure`, `gce` and
+`aiven`. [observability.md](observability.md#choosing-a-preset) describes them.
+
+A name that is not a preset is not rejected when the object is created (the
+list belongs to the pgwatch release, not to the API). The operator reports it
+instead: the monitor gets `Ready=False` and `ConfigGenerated=False` with reason
+`InvalidPreset`, a message that lists the usable names, and a warning event;
+no collector is created for it, and a collector that already runs keeps its
+last valid configuration. The same happens for the presets pgwatch ships for
+other kinds of sources, which collect nothing from a PostgreSQL database:
+`patroni` (for its Prometheus-scraping sources), `pgbouncer` and `pgpool`. A
+name with other characters than the pattern above allows, such as
+`postgres-exporter-basic`, is refused by the API server itself.
+
 ### spec.resources
 
 Standard Kubernetes `ResourceRequirements` (`requests`, `limits`).
@@ -74,8 +92,18 @@ Standard Kubernetes `ResourceRequirements` (`requests`, `limits`).
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `repository` | string | no | `cybertecpostgresql/pgwatch` | pgwatch image repository |
-| `tag` | string | no | `5.1.0` | Image tag |
+| `tag` | string | no | `6.2.0` | Image tag. Leave unset to run the pgwatch release the operator is built for |
 | `pullPolicy` | enum | no | `IfNotPresent` | `Always`, `IfNotPresent`, `Never` |
+
+The defaults of `repository` and `tag` are applied by the operator when it
+builds the collector pod; they are not written into the object. A monitor that
+leaves them unset therefore moves to the newer pgwatch release when the
+operator is upgraded, and one that sets them stays where it is. (Monitors
+created under operator v1.0.2 or older had `tag: "5.1.0"` written into them;
+see [troubleshooting](troubleshooting.md#collector-still-runs-an-old-pgwatch-after-an-operator-upgrade).) Setting a tag
+is only needed to hold a monitor back: the metric definitions the operator
+hands to the collector are those of its default release (see
+[architecture.md](architecture.md#metricsyaml)).
 
 ### spec.podMetadata / spec.serviceMetadata
 
@@ -136,7 +164,7 @@ Between 1 and 256 entries; metric names must be unique within the library.
 | `interval` | duration | no | `60s` | Collection period as a Go duration (e.g. `30s`, `5m`); at least `1s`, used in whole seconds |
 | `sqls` | map[string]string | yes | | Minimum PostgreSQL major version -> SQL (see below). 1 to 32 entries; statements must not be empty |
 | `gauges` | []string | no | | Columns treated as gauges. `["*"]` = all columns |
-| `statementTimeoutSeconds` | int32 | no | `0` | **Deprecated, ignored.** pgwatch has no per-metric timeout; set `statement_timeout` on the monitoring role instead |
+| `statementTimeoutSeconds` | int32 | no | `0` | **Deprecated, ignored.** pgwatch has no configurable per-metric timeout (see [query time](#query-time)); set `statement_timeout` on the monitoring role instead |
 | `masterOnly` | bool | no | `false` | Collect only on primary instances. Cannot be combined with `standbyOnly` |
 | `standbyOnly` | bool | no | `false` | Collect only on standby instances. Cannot be combined with `masterOnly` |
 | `isInstanceLevel` | bool | no | `false` | Instance-wide metric (not database-scoped) |
@@ -158,6 +186,46 @@ sqls:
   "0":  SELECT ...   # every version below 17
   "17": SELECT ...   # 17 and newer
 ```
+
+#### Result columns
+
+A column becomes a series `pgwatch_<metric>_<column>` when its type is
+`integer`, `bigint`, `real`, `double precision` or `boolean` (exported as 0 or
+1). Columns named `tag_<x>` become the label `<x>` instead. Every other type is
+dropped without a log line - text, timestamps, and also `numeric`, `smallint`
+and `oid`, which is what `avg()`, `round(x, 2)` and `sum()` of a `bigint`
+return: cast such results, e.g. `round(avg(x), 2)::float8 AS avg_x`.
+
+Return the measurement time as `(extract(epoch from now()) * 1e9)::int8 AS
+epoch_ns`, as pgwatch's own metrics do; without the column pgwatch stamps the
+row with its own clock when it fetches it. Either way the Prometheus sink
+serves a metric for ten minutes after that timestamp and then drops it until
+the next collection, so a metric with an `interval` above ten minutes has gaps
+in Prometheus; query it with `last_over_time(...)` over a range longer than
+the interval.
+
+#### Query time
+
+pgwatch 6 collects all metrics of a monitor in one loop over a single
+connection: the metrics that are due at the same moment are sent to the server
+together. Two consequences for custom metrics:
+
+- The metrics of one batch share one time limit: 30 seconds, or the greatest
+  common divisor of all the monitor's intervals if that is longer (30 or 60
+  seconds with most presets). What has not finished by then is cancelled, on
+  the server as well, and tried again alone; the limit is then the metric's
+  own `interval`, at least 30 seconds. A query slower than the first limit
+  therefore runs twice at every collection. One slower than the second never
+  produces data; with pgwatch 5 it did, late.
+- While a slow query runs, the other metrics of the same monitor wait,
+  `pgwatch_instance_up` included. A long `interval` does not isolate a slow
+  metric, it only makes the wait rarer.
+
+Keep metric queries fast, give the monitoring role a `statement_timeout` (and a
+`lock_timeout` if the queries can wait on locks), and put a query that is
+heavy by nature into a PgpilotMonitor of its own: there it is the only metric
+of its batch, the single limit is its own interval, and it can only delay
+itself.
 
 ### status
 

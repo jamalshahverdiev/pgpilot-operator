@@ -28,6 +28,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 WORKDIR /
 COPY --from=builder /workspace/manager .
+# The binary embeds pgwatch's metric definitions (BSD 3-Clause), whose licence
+# has to accompany every copy; the operator's own licence goes with it.
+COPY LICENSE /licenses/LICENSE
+COPY internal/builder/pgwatchdata/LICENSE /licenses/pgwatch.LICENSE
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

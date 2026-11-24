@@ -69,9 +69,12 @@ type MetricDefinition struct {
 
 	// statementTimeoutSeconds is accepted for compatibility and ignored.
 	//
-	// Deprecated: pgwatch has no per-metric statement timeout, so the value
-	// was never applied. Limit query time on the database side instead,
-	// e.g. `ALTER ROLE <monitoring role> SET statement_timeout = '5s'`.
+	// Deprecated: pgwatch has no configurable per-metric timeout, so the
+	// value was never applied. From pgwatch 6 on the collector cancels
+	// metric queries on its own: those due together after 30 seconds, and
+	// one retried alone after its interval (at least 30 seconds). For a
+	// limit of your choosing set it on the database side, e.g.
+	// `ALTER ROLE <monitoring role> SET statement_timeout = '5s'`.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	StatementTimeoutSeconds int32 `json:"statementTimeoutSeconds,omitempty"`

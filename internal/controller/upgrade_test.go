@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,9 +50,13 @@ import (
 var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 	var (
 		env        *envtest.Environment
+		restConfig *rest.Config
 		c          client.Client
 		reconciler *PgpilotMonitorReconciler
 		ns         string
+		// imageNS holds the monitors of the specs about the image an
+		// earlier release wrote into the spec.
+		imageNS string
 		// What the API server tolerates for an object whose stored spec
 		// breaks a rule, as long as the offending value is not changed:
 		// from Kubernetes 1.30 updates of the object itself, from 1.33 also
@@ -127,7 +132,8 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 		if dir := envtestBinaryDir(envtestAssetsFromEnv(), filepath.Join("..", "..", "bin", "k8s")); dir != "" {
 			env.BinaryAssetsDirectory = dir
 		}
-		restConfig, err := env.Start()
+		var err error
+		restConfig, err = env.Start()
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(env.Stop()).To(Succeed()) })
 
@@ -157,6 +163,28 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 		for name := range stale {
 			Expect(c.Create(context.TODO(), staleMonitor(name))).To(Succeed(),
 				"%s must be valid under the old CRDs, otherwise it proves nothing", name)
+		}
+
+		By("letting the v1.0.2 operator reconcile monitors that name no image, or pin one")
+		images := &corev1.Namespace{}
+		images.GenerateName = "test-upgrade-image-"
+		Expect(c.Create(context.TODO(), images)).To(Succeed())
+		imageNS = images.Name
+		secret := &corev1.Secret{StringData: map[string]string{"username": "pgwatch", "password": "secret"}}
+		secret.Name, secret.Namespace = "pg-creds", imageNS
+		Expect(c.Create(context.TODO(), secret)).To(Succeed())
+
+		Expect(c.Create(context.TODO(), minimalMonitor(imageNS, "no-image"))).To(Succeed())
+		Expect(c.Create(context.TODO(),
+			withSpec(minimalMonitor(imageNS, "pinned"), map[string]any{"tag": "5.1.0"}, "image"))).To(Succeed())
+		// What that release did on its first reconcile: read the object,
+		// add the finalizer and send the whole object back.
+		oldOperator := legacyOperatorClient(restConfig)
+		for _, name := range []string{"no-image", "pinned"} {
+			var monitor pgpilotv1.PgpilotMonitor
+			Expect(oldOperator.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: imageNS}, &monitor)).To(Succeed())
+			monitor.Finalizers = append(monitor.Finalizers, finalizerName)
+			Expect(oldOperator.Update(context.TODO(), &monitor)).To(Succeed())
 		}
 
 		By("installing the current CRDs over them")
@@ -238,5 +266,101 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 			err = c.Get(context.TODO(), key, &monitor)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the object must be gone, got: %v", err)
 		}
+	})
+
+	// The monitor that named no image has one in its stored spec all the
+	// same, written by the old operator's update and the old CRD's defaults.
+	// Left there it would pin the collector to pgwatch 5.1.0 for good.
+	Describe("the pgwatch image an earlier release wrote into the spec", Ordered, func() {
+		key := func(name string) types.NamespacedName {
+			return types.NamespacedName{Name: name, Namespace: imageNS}
+		}
+		reconciled := func(name string) string {
+			GinkgoHelper()
+			_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{NamespacedName: key(name)})
+			Expect(err).NotTo(HaveOccurred())
+			return collectorImage(c, key(name))(Default)
+		}
+
+		It("is in every monitor that release reconciled", func() {
+			Expect(storedImage(c, key("no-image"))).To(Equal(legacyImageBlock()))
+			Expect(storedImage(c, key("pinned"))).To(Equal(legacyImageBlock()))
+			Expect(reconciled("no-image")).To(Equal(legacyImage), "without the migration the stored tag decides")
+		})
+
+		It("is removed where nobody asked for it, and kept where the user did", func() {
+			migration := &StoredImageMigration{Reader: c, Client: c, Recorder: record.NewFakeRecorder(10)}
+			result, err := migration.Run(context.TODO())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Migrated).To(Equal(1))
+			Expect(result.Kept).To(ConsistOf(HavePrefix(imageNS + "/pinned (tag set by ")))
+
+			Expect(storedImage(c, key("no-image"))).To(Equal(map[string]any{"pullPolicy": "IfNotPresent"}))
+			Expect(reconciled("no-image")).To(Equal(currentImage))
+
+			// The user wrote the tag; the repository next to it came from
+			// the old CRD's default, in the user's own request.
+			Expect(storedImage(c, key("pinned"))).To(Equal(legacyImageBlock()))
+			Expect(reconciled("pinned")).To(Equal(legacyImage))
+		})
+
+		// A rollback to the old release and a second upgrade. Under the old
+		// CRD the API server fills the tag in again, and the old operator's
+		// next status update stores it - this time owned by nobody.
+		It("is not reported as removed while the old CRD is served, and is removed after the CRDs are upgraded", func() {
+			installCRDs := func(dir ...string) {
+				GinkgoHelper()
+				_, err := envtest.InstallCRDs(restConfig, envtest.CRDInstallOptions{
+					Paths: []string{filepath.Join(dir...)}, ErrorIfPathMissing: true,
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			newRulesActive := func() bool {
+				probe := staleMonitor("sqls-wildcard")
+				probe.SetName("probe")
+				return apierrors.IsInvalid(c.Create(context.TODO(), probe, client.DryRunAll))
+			}
+			Expect(storedImage(c, key("no-image"))).To(Equal(map[string]any{"pullPolicy": "IfNotPresent"}),
+				"the spec before starts from the migrated state")
+
+			By("rolling back to the old CRDs and letting the old operator write status")
+			installCRDs("testdata", "crds-v1.0.2")
+			Eventually(newRulesActive, timeout, interval).Should(BeFalse())
+			Eventually(func() map[string]any { return storedImage(c, key("no-image")) }, timeout, interval).
+				Should(HaveKeyWithValue("tag", "5.1.0"), "the old CRD defaults the tag whenever the object is read")
+			oldOperator := legacyOperatorClient(restConfig)
+			var monitor pgpilotv1.PgpilotMonitor
+			Expect(oldOperator.Get(context.TODO(), key("no-image"), &monitor)).To(Succeed())
+			monitor.Status.ConfigHash = "written-after-the-rollback"
+			Expect(oldOperator.Status().Update(context.TODO(), &monitor)).To(Succeed())
+
+			By("running the migration while the old CRD is still served")
+			recorder := record.NewFakeRecorder(10)
+			migration := &StoredImageMigration{Reader: c, Client: c, Recorder: recorder}
+			result, err := migration.Run(context.TODO())
+			Expect(err).To(MatchError(errTagStillDefaulted))
+			Expect(result.Migrated).To(BeZero(), "nothing changed, so nothing may be counted")
+			Expect(drain(recorder)).To(BeEmpty(), "and no event may claim otherwise")
+			Expect(storedImage(c, key("no-image"))).To(HaveKeyWithValue("tag", "5.1.0"))
+
+			By("upgrading the CRDs again")
+			installCRDs("..", "..", "config", "crd", "bases")
+			Eventually(newRulesActive, timeout, interval).Should(BeTrue())
+			Expect(storedImage(c, key("no-image"))).To(HaveKeyWithValue("tag", "5.1.0"),
+				"the status update under the old CRD stored the default")
+			var stored pgpilotv1.PgpilotMonitor
+			Expect(c.Get(context.TODO(), key("no-image"), &stored)).To(Succeed())
+			owned, err := legacyOwnedImageFields(&stored)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(owned.tag).To(BeTrue(), "a tag nobody owns is a default nobody asked for")
+
+			result, err = migration.Run(context.TODO())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Migrated).To(Equal(1))
+			Expect(drain(recorder)).To(HaveLen(1))
+			Expect(storedImage(c, key("no-image"))).To(Equal(map[string]any{"pullPolicy": "IfNotPresent"}))
+			Expect(reconciled("no-image")).To(Equal(currentImage))
+			Expect(storedImage(c, key("pinned"))).To(Equal(legacyImageBlock()), "the user's tag survives all of it")
+		})
 	})
 })

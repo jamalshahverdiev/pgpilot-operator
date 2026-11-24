@@ -29,7 +29,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,6 +62,9 @@ var (
 	// managerCache is the cache of that manager, for specs about what it
 	// keeps in memory.
 	managerCache cache.Cache
+	// leftBehindBeforeStart is a monitor that already existed, in the state
+	// an old operator release left it, when the manager started.
+	leftBehindBeforeStart types.NamespacedName
 )
 
 const (
@@ -137,6 +142,20 @@ var _ = BeforeSuite(func() {
 	operator, err := testEnv.AddUser(envtest.User{Name: operatorUser}, &rest.Config{QPS: 1000, Burst: 2000})
 	Expect(err).NotTo(HaveOccurred())
 	operatorConfig = operator.Config()
+
+	// A monitor as operator releases up to v1.0.2 left it, stored before the
+	// manager starts: the spec about it proves that the manager itself, set
+	// up the way main sets it up, moves such monitors to its pgwatch release.
+	legacyNamespace := &corev1.Namespace{}
+	legacyNamespace.GenerateName = "test-left-behind-"
+	Expect(k8sClient.Create(context.TODO(), legacyNamespace)).To(Succeed())
+	leftBehindBeforeStart = types.NamespacedName{Name: "left-behind", Namespace: legacyNamespace.Name}
+	legacySecret := &corev1.Secret{StringData: map[string]string{"username": "pgwatch", "password": "secret"}}
+	legacySecret.Name, legacySecret.Namespace = "pg-creds", legacyNamespace.Name
+	Expect(k8sClient.Create(context.TODO(), legacySecret)).To(Succeed())
+	legacyMonitor := withSpec(minimalMonitor(legacyNamespace.Name, leftBehindBeforeStart.Name), legacyImageBlock(), "image")
+	legacyMonitor.SetFinalizers([]string{finalizerName})
+	Expect(legacyOperatorClient(cfg).Create(context.TODO(), legacyMonitor)).To(Succeed())
 
 	// Start a real manager so reconcile loops run. It is built the way
 	// main builds it: same cache and client settings, same controller setup.

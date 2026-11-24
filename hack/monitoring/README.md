@@ -66,7 +66,7 @@ corresponding panels until the first collection completes:
 | `index_stats` | 15 min | Unused indexes |
 | `table_io_stats` | 10 min | — |
 | `sequence_health` | 1 hour | — |
-| `settings` | 2 hours | — |
+| `settings_num` | 2 hours | — |
 
 The dashboard wraps these in `max_over_time(...[N])` so the last value
 stays visible between collections. This is the correct Prometheus pattern

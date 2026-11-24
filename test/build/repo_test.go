@@ -192,32 +192,34 @@ func TestToolchain_MakefilePinsToolVersions(t *testing.T) {
 }
 
 // The linter never saw the e2e suite because it sits behind a build tag.
-func TestToolchain_LinterCoversTheE2ESuite(t *testing.T) {
+func TestToolchain_LinterCoversTheTaggedSuites(t *testing.T) {
 	cfg := parseRepoYAML(t, ".golangci.yml")
 	run, _ := cfg["run"].(map[string]any)
 	tags, _ := run["build-tags"].([]any)
-	if len(tags) != 1 || tags[0] != "e2e" {
-		t.Errorf(".golangci.yml run.build-tags = %v, want [e2e]", tags)
+	if len(tags) != 2 || tags[0] != "e2e" || tags[1] != "collector" {
+		t.Errorf(".golangci.yml run.build-tags = %v, want [e2e collector]", tags)
 	}
 
-	files, err := filepath.Glob(filepath.Join(repoRoot, "test", "e2e", "*.go"))
-	if err != nil || len(files) == 0 {
-		t.Fatalf("no e2e sources found (err: %v)", err)
-	}
-	for _, f := range files {
-		src, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
+	for _, tag := range []string{"e2e", "collector"} {
+		files, err := filepath.Glob(filepath.Join(repoRoot, "test", tag, "*.go"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("no %s sources found (err: %v)", tag, err)
 		}
-		name := filepath.Base(f)
-		if !strings.HasPrefix(string(src), "//go:build e2e\n") {
-			t.Errorf("%s must start with `//go:build e2e`", name)
-		}
-		if strings.Contains(string(src), "// +build") {
-			t.Errorf("%s still carries an old-style `// +build` line", name)
-		}
-		if regexp.MustCompile(`[a-z0-9/.-]+:latest\b`).Match(src) {
-			t.Errorf("%s uses an image tagged :latest", name)
+		for _, f := range files {
+			src, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := filepath.Base(f)
+			if !strings.HasPrefix(string(src), "//go:build "+tag+"\n") {
+				t.Errorf("%s must start with `//go:build %s`", name, tag)
+			}
+			if strings.Contains(string(src), "// +build") {
+				t.Errorf("%s still carries an old-style `// +build` line", name)
+			}
+			if regexp.MustCompile(`[a-z0-9/.-]+:latest\b`).Match(src) {
+				t.Errorf("%s uses an image tagged :latest", name)
+			}
 		}
 	}
 }
@@ -329,6 +331,7 @@ func TestWorkflows_RunTheMakefileTargets(t *testing.T) {
 			"run: go mod tidy -diff",
 			"run: make test",
 			`git status --porcelain`,
+			"run: make test-collector COLLECTOR_TEST_POSTGRES=postgres:${{ matrix.postgres }}",
 		},
 		".github/workflows/test-e2e.yml": {
 			"run: make test-e2e",
@@ -531,6 +534,9 @@ func TestMain_BuildsTheManagerThroughTheControllerPackage(t *testing.T) {
 		"controller.SetupWithManager(mgr, controllerOptions)",
 		"CredentialsRecheck:    credentialsRecheck,",
 		"ServiceMonitorEnabled: serviceMonitorEnabled,",
+		// The flag says "migrate", the option says "keep": the negation
+		// is what connects them.
+		"KeepStoredImageTag:    !migrateStoredImageTag,",
 	} {
 		if !strings.Contains(main, call) {
 			t.Errorf("cmd/main.go no longer contains %q", call)
@@ -545,5 +551,8 @@ func TestMain_BuildsTheManagerThroughTheControllerPackage(t *testing.T) {
 	if !regexp.MustCompile(`flag\.DurationVar\(&credentialsRecheck, "credentials-recheck-interval", 5\*time\.Minute,`).
 		MatchString(main) {
 		t.Error("the --credentials-recheck-interval flag or its five minute default is gone")
+	}
+	if !strings.Contains(main, `flag.BoolVar(&migrateStoredImageTag, "migrate-stored-image-tag", true,`) {
+		t.Error("the --migrate-stored-image-tag flag is gone or no longer on by default")
 	}
 }

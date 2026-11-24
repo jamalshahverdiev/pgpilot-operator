@@ -155,6 +155,10 @@ type MetricsSpec struct {
 	// preset is the name of a pgwatch built-in preset (e.g. "basic",
 	// "standard", "exhaustive", "recommendations", "rds", "aurora").
 	// Leave empty to rely entirely on libraries and custom metrics.
+	// A name pgwatch does not know, or one of its presets for sources
+	// other than PostgreSQL ("patroni", "pgbouncer", "pgpool"), is
+	// reported in the monitor's status and no collector configuration is
+	// generated for it.
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^([a-z][a-z0-9_]*)?$`
 	// +optional
@@ -250,16 +254,19 @@ type GRPCTLS struct {
 	CASecretRef string `json:"caSecretRef,omitempty"`
 }
 
-// ImageSpec overrides the pgwatch container image. Defaults are chosen so
-// that most users can leave this unset entirely.
+// ImageSpec overrides the pgwatch container image. Most users can leave this
+// unset entirely: the operator then runs the pgwatch release it was built
+// and tested for, and moves to a newer one when the operator is upgraded.
 type ImageSpec struct {
-	// repository of the pgwatch image.
-	// +kubebuilder:default="cybertecpostgresql/pgwatch"
+	// repository of the pgwatch image. Leave empty for the operator's
+	// default, cybertecpostgresql/pgwatch.
 	// +optional
 	Repository string `json:"repository,omitempty"`
 
-	// tag of the pgwatch image.
-	// +kubebuilder:default="5.1.0"
+	// tag of the pgwatch image. Leave empty to run the pgwatch release this
+	// operator version is built for; that is the recommended setting, since
+	// the metric definitions the operator hands to the collector come from
+	// that release. A tag set here is kept across operator upgrades.
 	// +optional
 	Tag string `json:"tag,omitempty"`
 

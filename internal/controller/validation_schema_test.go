@@ -231,12 +231,16 @@ var _ = Describe("CRD defaults and enumerations", func() {
 		Expect(field(spec, "sinks", "prometheus", "port")).To(BeEquivalentTo(9187))
 	})
 
-	It("defaults the image only where the user opened the block", func() {
+	// A repository or tag written by the API server stays in the object for
+	// good and would keep the monitor on that pgwatch release after the
+	// operator has moved to a newer one. The operator fills them in itself.
+	It("stores no image repository or tag of its own", func() {
 		spec := stored(withSpec(minimalMonitor(ns, "image-block"), map[string]any{}, "image"))
 
-		Expect(field(spec, "image", "repository")).To(Equal("cybertecpostgresql/pgwatch"))
-		Expect(field(spec, "image", "tag")).To(Equal("5.1.0"))
-		Expect(field(spec, "image", "pullPolicy")).To(Equal("IfNotPresent"))
+		image, found, err := unstructured.NestedMap(spec, "image")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(image).To(Equal(map[string]any{"pullPolicy": "IfNotPresent"}))
 	})
 
 	// `prometheus: {port: N}` is how one changes only the port; it must not

@@ -1,9 +1,11 @@
 version: "2"
 run:
   allow-parallel-runners: true
-  # The e2e suite is behind a build tag; without it the linter never sees it.
+  # The e2e suite and the collector tests are behind build tags; without
+  # them the linter never sees them.
   build-tags:
     - e2e
+    - collector
 linters:
   default: none
   enable:

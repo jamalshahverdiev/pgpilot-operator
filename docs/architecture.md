@@ -2,7 +2,7 @@
 
 ## Overview
 
-pgpilot-operator is a Kubernetes operator that manages [pgwatch v5](https://github.com/cybertec-postgresql/pgwatch) instances declaratively through CRDs. It does not reinvent metrics collection — pgwatch handles that. The operator handles the Kubernetes lifecycle.
+pgpilot-operator is a Kubernetes operator that manages [pgwatch v6](https://github.com/cybertec-postgresql/pgwatch) instances declaratively through CRDs. It does not reinvent metrics collection — pgwatch handles that. The operator handles the Kubernetes lifecycle.
 
 ## Core design decisions
 
@@ -78,6 +78,13 @@ on top, and emits the combined file — this is required because pgwatch's
 `--metrics <file>` flag **replaces** its built-in registry rather than
 merging, so a custom metrics.yaml without the built-in metric
 definitions would break preset resolution.
+
+The embedded file is the unmodified registry of one pgwatch release, the same
+release whose image a monitor runs by default
+(`internal/builder/pgwatchdata/VERSION`; `make update-pgwatch-registry` fetches
+another one). A monitor that pins an older `spec.image.tag` still receives this
+registry: the two are meant to be used together, which is why leaving the tag
+unset is the recommended setting.
 
 ```yaml
 metrics:

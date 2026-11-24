@@ -34,7 +34,7 @@ func TestBuildDeployment_ContainerImage(t *testing.T) {
 	dep := BuildDeployment(monitor, merged, PodTemplateVersions{Config: "h"})
 
 	img := dep.Spec.Template.Spec.Containers[0].Image
-	if img != "cybertecpostgresql/pgwatch:5.1.0" {
+	if img != "cybertecpostgresql/pgwatch:6.2.0" {
 		t.Errorf("image: got %q, want default", img)
 	}
 

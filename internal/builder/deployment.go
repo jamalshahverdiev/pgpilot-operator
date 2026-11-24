@@ -35,9 +35,11 @@ const (
 )
 
 // PodTemplateVersions are markers written as annotations on the pod template.
-// The collector reads its configuration and credentials only when it starts,
-// so a change in either has to replace the pod; a changed annotation is what
-// makes the Deployment do that.
+// The collector takes its credentials from the environment, which is fixed
+// when it starts, and although it re-reads its configuration files every two
+// minutes, a mounted ConfigMap takes about as long again to reach the pod. A
+// change in either therefore replaces the pod, which applies it at a known
+// moment; a changed annotation is what makes the Deployment do that.
 type PodTemplateVersions struct {
 	// Config is the hash of the rendered ConfigMap.
 	Config string
@@ -231,14 +233,17 @@ func CredentialKeys(ref *pgpilotv1.CredentialsSecretRef) (usernameKey, passwordK
 	return usernameKey, passwordKey
 }
 
+// containerImage is the collector image of a monitor. Whatever the monitor
+// leaves unset follows the operator, so that an operator upgrade moves the
+// collector to the pgwatch release the new operator was built for.
 func containerImage(monitor *pgpilotv1.PgpilotMonitor) string {
 	repo := monitor.Spec.Image.Repository
 	if repo == "" {
-		repo = "cybertecpostgresql/pgwatch"
+		repo = DefaultImageRepository
 	}
 	tag := monitor.Spec.Image.Tag
 	if tag == "" {
-		tag = "5.1.0"
+		tag = PgwatchVersion
 	}
 	return repo + ":" + tag
 }

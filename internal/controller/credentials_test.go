@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -817,5 +818,70 @@ func TestReconcilerIntervals_DefaultWhenUnset(t *testing.T) {
 	r = &PgpilotMonitorReconciler{CredentialsRecheck: time.Minute, CredentialsRetry: 5 * time.Second}
 	if r.credentialsRecheck() != time.Minute || r.credentialsRetry() != 5*time.Second {
 		t.Errorf("configured intervals are not used: %v, %v", r.credentialsRecheck(), r.credentialsRetry())
+	}
+}
+
+// A preset that cannot be collected is a mistake in the spec. Retrying it
+// changes nothing, and a returned error would have the controller retry it
+// with backoff for ever; the next edit of the spec starts a reconcile anyway.
+func TestReconcile_InvalidPresetIsReportedAndNotRetried(t *testing.T) {
+	unitScheme(t)
+	for _, preset := range []string{"exhaustiv", "patroni", "pgbouncer"} {
+		t.Run(preset, func(t *testing.T) {
+			monitor := unitMonitor()
+			monitor.Spec.Metrics.Preset = preset
+			secret := &corev1.Secret{Data: map[string][]byte{"username": []byte("u"), "password": []byte("p")}}
+			secret.Name, secret.Namespace = "db-creds", "team"
+			c := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+				WithObjects(monitor, secret).WithStatusSubresource(monitor).Build()
+			recorder := record.NewFakeRecorder(10)
+			r := &PgpilotMonitorReconciler{Client: c, Scheme: scheme.Scheme, Recorder: recorder}
+
+			result, err := r.Reconcile(context.Background(),
+				ctrl.Request{NamespacedName: client.ObjectKeyFromObject(monitor)})
+			if err != nil {
+				t.Errorf("Reconcile returned %v: an error is retried with backoff for ever", err)
+			}
+			if result != (ctrl.Result{}) {
+				t.Errorf("Reconcile asked for another run (%+v); nothing can change until the spec does", result)
+			}
+
+			var got pgpilotv1.PgpilotMonitor
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(monitor), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.Ready || got.Status.ObservedGeneration != monitor.Generation {
+				t.Errorf("status: ready=%v observedGeneration=%d", got.Status.Ready, got.Status.ObservedGeneration)
+			}
+			for _, conditionType := range []string{"Ready", "ConfigGenerated"} {
+				cond := meta.FindStatusCondition(got.Status.Conditions, conditionType)
+				if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "InvalidPreset" ||
+					!strings.Contains(cond.Message, strconv.Quote(preset)) {
+					t.Errorf("condition %s: %+v", conditionType, cond)
+				}
+			}
+			// The credentials were fine, and say so.
+			if cond := meta.FindStatusCondition(got.Status.Conditions, "CredentialsAvailable"); cond == nil ||
+				cond.Status != metav1.ConditionTrue {
+				t.Errorf("condition CredentialsAvailable: %+v", cond)
+			}
+			events := drain(recorder)
+			if len(events) != 1 || !strings.HasPrefix(events[0], "Warning InvalidPreset ") {
+				t.Errorf("events: %q", events)
+			}
+
+			var deployments appsv1.DeploymentList
+			var configMaps corev1.ConfigMapList
+			if err := c.List(context.Background(), &deployments); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.List(context.Background(), &configMaps); err != nil {
+				t.Fatal(err)
+			}
+			if len(deployments.Items)+len(configMaps.Items) != 0 {
+				t.Errorf("generated %d Deployments and %d ConfigMaps for a preset that collects nothing",
+					len(deployments.Items), len(configMaps.Items))
+			}
+		})
 	}
 }

@@ -227,6 +227,7 @@ var valueSets = map[string][]string{
 	},
 	"fullnameOverride":             {"--set", "fullnameOverride=custom-name"},
 	"credentials recheck interval": {"--set", "credentials.recheckInterval=1m"},
+	"stored image tag kept":        {"--set", "migrations.storedImageTag=false"},
 	"image tag override":           {"--set", "image.tag=v9.9.9"},
 	"image repository override":    {"--set", "image.repository=registry.example.com/mirror/pgpilot-operator"},
 }
@@ -602,6 +603,62 @@ func TestRender_CredentialsRecheckInterval(t *testing.T) {
 			}
 		}
 		if strings.Join(rest, " ") != strings.Join(without, " ") {
+			t.Errorf("other arguments changed:\n with:    %v\n without: %v", rest, without)
+		}
+	})
+}
+
+// Whether the operator removes the pgwatch image tag an earlier release wrote
+// into the monitors is an operator flag that defaults to on; chart users can
+// only turn it off through this value.
+func TestRender_StoredImageTagMigration(t *testing.T) {
+	const flag = "--migrate-stored-image-tag"
+	find := func(args []string) []string {
+		var found []string
+		for _, a := range args {
+			if strings.HasPrefix(a, flag) {
+				found = append(found, a)
+			}
+		}
+		return found
+	}
+
+	t.Run("left on by default", func(t *testing.T) {
+		if got := find(managerArgs(t, render(t))); len(got) != 0 {
+			t.Errorf("default values render %q; the flag must be absent so the operator's default (on) applies", got)
+		}
+	})
+	t.Run("on when set explicitly", func(t *testing.T) {
+		if got := find(managerArgs(t, render(t, "--set", "migrations.storedImageTag=true"))); len(got) != 0 {
+			t.Errorf("storedImageTag=true renders %q", got)
+		}
+	})
+	// A values file or --set-string gives "false" as text; that must not
+	// read as "on".
+	t.Run("turned off with the value given as text", func(t *testing.T) {
+		got := find(managerArgs(t, render(t, "--set-string", "migrations.storedImageTag=false")))
+		if len(got) != 1 || got[0] != flag+"=false" {
+			t.Errorf("args with the string \"false\": %v, want %s=false", got, flag)
+		}
+	})
+	// --reuse-values on a release installed before the value existed.
+	t.Run("on when the whole block is missing", func(t *testing.T) {
+		if got := find(managerArgs(t, render(t, "--set", "migrations=null"))); len(got) != 0 {
+			t.Errorf("without a migrations block the chart renders %q", got)
+		}
+	})
+	t.Run("turned off", func(t *testing.T) {
+		with := managerArgs(t, render(t, "--set", "migrations.storedImageTag=false"))
+		if got := find(with); len(got) != 1 || got[0] != flag+"=false" {
+			t.Errorf("args = %v, want exactly one %s=false", with, flag)
+		}
+		var rest []string
+		for _, a := range with {
+			if !strings.HasPrefix(a, flag) {
+				rest = append(rest, a)
+			}
+		}
+		if without := managerArgs(t, render(t)); strings.Join(rest, " ") != strings.Join(without, " ") {
 			t.Errorf("other arguments changed:\n with:    %v\n without: %v", rest, without)
 		}
 	})

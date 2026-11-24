@@ -12,3 +12,7 @@
 
 # Re-include embedded data files (used with go:embed)
 !internal/builder/pgwatchdata/metrics.yaml
+
+# Re-include the licences shipped inside the image
+!LICENSE
+!internal/builder/pgwatchdata/LICENSE
