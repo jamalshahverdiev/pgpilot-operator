@@ -101,6 +101,25 @@ presets:
 
 The ConfigMap content is hashed (SHA-256). The hash is set as the `pgpilot.io/config-hash` annotation on the Deployment's pod template. When the config changes, the hash changes, triggering a rolling update.
 
+## Credentials and what the operator reads
+
+A monitor's credentials are either inline or in a Secret of the same namespace.
+For a Secret the operator only checks that it exists and has both keys, and
+points the pod's `PGUSER` / `PGPASSWORD` at it; the values never pass through
+the operator.
+
+- The operator may `get` a Secret by name and nothing else: no list, no watch,
+  and Secrets are never cached.
+- Because nothing watches Secrets, the one a monitor references is read again
+  periodically (five minutes by default). A token derived from the Secret
+  object's identity and version - not from its values - is set as the
+  `pgpilot.io/credentials-version` annotation on the pod template, so a changed
+  Secret replaces the pod just like a changed config does.
+- ConfigMaps, Deployments, Services, Pods and ServiceMonitors are cached only
+  when they carry `app.kubernetes.io/managed-by: pgpilot-operator`, which every
+  generated object does. The operator's memory use therefore follows the number
+  of monitors, not the size of the cluster.
+
 ## Metric merge order
 
 When a PgpilotMonitor references a preset, libraries, and inline custom metrics:

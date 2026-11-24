@@ -34,18 +34,34 @@ const (
 	webDisableArg = "--web-disable=all"
 )
 
+// PodTemplateVersions are markers written as annotations on the pod template.
+// The collector reads its configuration and credentials only when it starts,
+// so a change in either has to replace the pod; a changed annotation is what
+// makes the Deployment do that.
+type PodTemplateVersions struct {
+	// Config is the hash of the rendered ConfigMap.
+	Config string
+	// Credentials identifies the state of the referenced credentials Secret.
+	// Empty for inline credentials, which are part of the pod template
+	// themselves.
+	Credentials string
+}
+
 // BuildDeployment creates the Deployment that runs the pgwatch collector.
 func BuildDeployment(
 	monitor *pgpilotv1.PgpilotMonitor,
 	merged MergedMetrics,
-	configHash string,
+	versions PodTemplateVersions,
 ) *appsv1.Deployment {
 	name := ResourceName(monitor.Name)
 	sysLabels := SystemLabels(monitor.Name)
 	podLabels := MergeLabels(sysLabels, monitor.Spec.PodMetadata.LabelMap())
 
 	podAnnotations := map[string]string{
-		AnnotationConfigHash: configHash,
+		AnnotationConfigHash: versions.Config,
+	}
+	if versions.Credentials != "" {
+		podAnnotations[AnnotationCredentialsVersion] = versions.Credentials
 	}
 	podAnnotations = MergeAnnotations(podAnnotations, monitor.Spec.PodMetadata.Annotations)
 
@@ -175,14 +191,7 @@ func buildEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
 
 	// Secret-based credentials.
 	secret := db.CredentialsSecret
-	usernameKey := secret.UsernameKey
-	if usernameKey == "" {
-		usernameKey = "username"
-	}
-	passwordKey := secret.PasswordKey
-	if passwordKey == "" {
-		passwordKey = "password"
-	}
+	usernameKey, passwordKey := CredentialKeys(secret)
 	return []corev1.EnvVar{
 		{
 			Name: "PGUSER",
@@ -203,6 +212,23 @@ func buildEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
 			},
 		},
 	}
+}
+
+// CredentialKeys returns the keys of the credentials Secret that hold the
+// username and the password. A key left empty in the reference means the
+// default name.
+func CredentialKeys(ref *pgpilotv1.CredentialsSecretRef) (usernameKey, passwordKey string) {
+	usernameKey, passwordKey = "username", "password"
+	if ref == nil {
+		return usernameKey, passwordKey
+	}
+	if ref.UsernameKey != "" {
+		usernameKey = ref.UsernameKey
+	}
+	if ref.PasswordKey != "" {
+		passwordKey = ref.PasswordKey
+	}
+	return usernameKey, passwordKey
 }
 
 func containerImage(monitor *pgpilotv1.PgpilotMonitor) string {

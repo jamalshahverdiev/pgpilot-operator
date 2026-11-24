@@ -225,9 +225,10 @@ var valueSets = map[string][]string{
 		"--set", "installCRDs=false,rbac.create=false",
 		"--set", "leaderElection.enabled=false,metrics.enabled=false",
 	},
-	"fullnameOverride":          {"--set", "fullnameOverride=custom-name"},
-	"image tag override":        {"--set", "image.tag=v9.9.9"},
-	"image repository override": {"--set", "image.repository=registry.example.com/mirror/pgpilot-operator"},
+	"fullnameOverride":             {"--set", "fullnameOverride=custom-name"},
+	"credentials recheck interval": {"--set", "credentials.recheckInterval=1m"},
+	"image tag override":           {"--set", "image.tag=v9.9.9"},
+	"image repository override":    {"--set", "image.repository=registry.example.com/mirror/pgpilot-operator"},
 }
 
 // ---------------------------------------------------------------------------
@@ -539,4 +540,69 @@ func TestDocs_InstallCommandPinsChartVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// manager arguments
+// ---------------------------------------------------------------------------
+
+func managerArgs(t *testing.T, objs []object) []string {
+	t.Helper()
+	deps := ofKind(objs, "Deployment")
+	if len(deps) != 1 {
+		t.Fatalf("rendered %d Deployments, want 1", len(deps))
+	}
+	containers, _ := nested(deps[0], "spec", "template", "spec", "containers").([]any)
+	c, _ := containers[0].(object)
+	raw, _ := c["args"].([]any)
+	args := make([]string, 0, len(raw))
+	for _, a := range raw {
+		args = append(args, a.(string))
+	}
+	return args
+}
+
+// The interval at which credential Secrets are read again is an operator
+// flag; chart users can only set it through this value.
+func TestRender_CredentialsRecheckInterval(t *testing.T) {
+	const flag = "--credentials-recheck-interval"
+	count := func(args []string) (n int, value string) {
+		for _, a := range args {
+			if strings.HasPrefix(a, flag) {
+				n++
+				value = a
+			}
+		}
+		return n, value
+	}
+
+	t.Run("left to the operator's default when unset", func(t *testing.T) {
+		if n, got := count(managerArgs(t, render(t))); n != 0 {
+			t.Errorf("default values render %q; the flag must be absent so the operator's default applies", got)
+		}
+	})
+
+	for _, interval := range []string{"1m", "30s", "1h30m"} {
+		t.Run("set to "+interval, func(t *testing.T) {
+			args := managerArgs(t, render(t, "--set", "credentials.recheckInterval="+interval))
+			n, got := count(args)
+			if n != 1 || got != flag+"="+interval {
+				t.Errorf("args = %v, want exactly one %s=%s", args, flag, interval)
+			}
+		})
+	}
+
+	t.Run("does not disturb the other arguments", func(t *testing.T) {
+		with := managerArgs(t, render(t, "--set", "credentials.recheckInterval=1m"))
+		without := managerArgs(t, render(t))
+		var rest []string
+		for _, a := range with {
+			if !strings.HasPrefix(a, flag) {
+				rest = append(rest, a)
+			}
+		}
+		if strings.Join(rest, " ") != strings.Join(without, " ") {
+			t.Errorf("other arguments changed:\n with:    %v\n without: %v", rest, without)
+		}
+	})
 }

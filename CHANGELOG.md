@@ -90,6 +90,48 @@ Upgrade notes:
     | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
   ```
 
+### Credentials
+
+- The operator no longer lists or watches Secrets. Its role grants `get` on
+  Secrets only, and Secrets are never cached: it used to keep every Secret of
+  the cluster, with its data, in memory. ConfigMaps, Deployments, Services,
+  Pods and ServiceMonitors are cached only when they carry the operator's
+  `managed-by` label, so the operator's memory no longer grows with the size of
+  the cluster.
+- A rotated password reaches the collector. The Secret a monitor references is
+  read again every five minutes (`--credentials-recheck-interval`, Helm value
+  `credentials.recheckInterval`); when it has changed, the pod is replaced.
+  Before, pgwatch kept the old password until someone restarted it, while the
+  monitor reported `Ready`. Annotating the monitor makes the operator look at
+  once.
+- A Secret without the username or password key is reported
+  (`SecretKeyMissing`, naming the key) instead of leaving the pod in
+  `CreateContainerConfigError` behind a green condition. A Secret that cannot
+  be read is reported as `SecretReadFailed` and retried with backoff rather
+  than being called "not found". `credentialsSecret.name` has to be a valid
+  object name.
+- While credentials are unusable, `status.ready` is `false` together with the
+  `Ready` condition; the READY column used to keep showing `true`.
+- The `DatabaseReachable` condition is now `CredentialsAvailable`. It never
+  checked that the database could be reached, only that credentials were
+  configured; the old condition is removed from existing objects. Anything
+  that reads `DatabaseReachable` (alerts, scripts) has to be changed.
+- A monitor is no longer reconciled again by its own status updates.
+
+Upgrade notes:
+
+- Upgrade (and roll back) the operator image and its ClusterRole together, as
+  `helm upgrade` / `helm rollback` do. An operator older than this release
+  under the new role cannot list Secrets any more: it logs `secrets is
+  forbidden` and stops reconciling every monitor while its pod stays Ready.
+  Do not pin `image.tag` to an older version with the new chart.
+- Every collector that takes its credentials from a Secret is restarted once
+  when the operator is upgraded (its pod template gains the
+  `pgpilot.io/credentials-version` annotation). Monitors with inline
+  credentials are not restarted.
+- From then on any change to a referenced Secret object restarts the
+  collector, also a change to its labels or annotations only.
+
 ### Changed
 
 - Built with Go 1.27 (was 1.25, which no longer receives security fixes). The

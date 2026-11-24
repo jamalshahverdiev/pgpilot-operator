@@ -124,7 +124,7 @@ var _ = Describe("CRD validation", func() {
 			func(interval string) {
 				for where, build := range kinds {
 					By(where)
-					Expect(k8sClient.Create(context.TODO(), build("good-interval", interval))).To(Succeed())
+					Expect(k8sClient.Create(context.TODO(), build("good-interval", interval), client.DryRunAll)).To(Succeed())
 				}
 			},
 			Entry("exactly one second", "1s"),
@@ -141,7 +141,7 @@ var _ = Describe("CRD validation", func() {
 		It("accepts a metric without an interval", func() {
 			for where, build := range kinds {
 				By(where)
-				Expect(k8sClient.Create(context.TODO(), build("no-interval", nil))).To(Succeed())
+				Expect(k8sClient.Create(context.TODO(), build("no-interval", nil), client.DryRunAll)).To(Succeed())
 			}
 		})
 
@@ -158,7 +158,7 @@ var _ = Describe("CRD validation", func() {
 			for where, build := range kinds {
 				By(where)
 				obj := build("update-interval", "30s")
-				Expect(k8sClient.Create(context.TODO(), obj)).To(Succeed())
+				createForSpec(obj)
 
 				Eventually(func(g Gomega) {
 					current := obj.DeepCopy()
@@ -186,8 +186,8 @@ var _ = Describe("CRD validation", func() {
 					Expect(k8sClient.Create(context.TODO(), build("poison", bad))).NotTo(Succeed())
 				}
 			}
-			Expect(k8sClient.Create(context.TODO(), newLibrary("healthy", "45s"))).To(Succeed())
-			Expect(k8sClient.Create(context.TODO(), newMonitor("healthy", "45s"))).To(Succeed())
+			createForSpec(newLibrary("healthy", "45s"))
+			createForSpec(newMonitor("healthy", "45s"))
 
 			// A typed List decodes every object of the kind in the
 			// namespace; one undecodable interval would fail the whole call.

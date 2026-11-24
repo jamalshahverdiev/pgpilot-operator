@@ -13,6 +13,9 @@ const (
 	LabelMonitorName  = "pgpilot.io/monitor"
 
 	AnnotationConfigHash = "pgpilot.io/config-hash"
+	// AnnotationCredentialsVersion changes whenever the credentials Secret of
+	// a monitor changes.
+	AnnotationCredentialsVersion = "pgpilot.io/credentials-version"
 
 	AppName   = "pgpilot-monitor"
 	ManagedBy = "pgpilot-operator"

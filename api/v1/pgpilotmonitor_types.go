@@ -116,8 +116,12 @@ type DatabaseRef struct {
 // PgpilotMonitor. Only the keys are read — the operator does not copy the
 // Secret anywhere else.
 type CredentialsSecretRef struct {
-	// name of the Secret.
+	// name of the Secret. It has to be a valid Secret name: lower-case
+	// letters, digits, '-' and '.', starting and ending with a letter or
+	// digit.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 
 	// usernameKey is the key inside the Secret containing the database
@@ -377,7 +381,10 @@ type PgpilotMonitorStatus struct {
 	// Typical types:
 	//   - "Ready"             — Pod is up and scraping
 	//   - "ConfigGenerated"   — ConfigMap matches spec
-	//   - "DatabaseReachable" — pgwatch can connect to the target DB
+	//   - "CredentialsAvailable" — inline credentials are set, or the
+	//     referenced Secret exists and has a value under both keys. Whether
+	//     the database accepts them is not checked: pgwatch keeps retrying,
+	//     and the pgwatch_instance_up metric tells.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

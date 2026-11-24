@@ -60,7 +60,7 @@ var _ = Describe("PgpilotMetricLibrary Controller", func() {
 	})
 
 	It("should set Valid condition to True for a library with metrics", func() {
-		Expect(k8sClient.Create(context.TODO(), lib)).To(Succeed())
+		createForSpec(lib)
 
 		Eventually(func() bool {
 			var l pgpilotv1.PgpilotMetricLibrary
@@ -77,7 +77,7 @@ var _ = Describe("PgpilotMetricLibrary Controller", func() {
 	})
 
 	It("should set ObservedGeneration on status", func() {
-		Expect(k8sClient.Create(context.TODO(), lib)).To(Succeed())
+		createForSpec(lib)
 
 		Eventually(func() int64 {
 			var l pgpilotv1.PgpilotMetricLibrary

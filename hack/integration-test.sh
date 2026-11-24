@@ -6,7 +6,7 @@
 #
 # Tests:
 #  1) Create PgpilotMonitor → ConfigMap, Deployment, Service created
-#  2) Status conditions: DatabaseReachable, ConfigGenerated
+#  2) Status conditions: CredentialsAvailable, ConfigGenerated
 #  3) Config hash triggers rollout on spec change
 #  4) PgpilotMetricLibrary reference works
 #  5) Missing Secret → Ready=False, SecretNotFound
@@ -161,8 +161,8 @@ SVC_SELECTOR=$(kubectl get service pgpilot-test-db -n "$TEST_NS" -o jsonpath='{.
 info "Test 5: Status conditions"
 sleep 5
 
-DB_REACHABLE=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.status.conditions[?(@.type=="DatabaseReachable")].status}' 2>/dev/null || echo "")
-[[ "$DB_REACHABLE" == "True" ]] && ok "DatabaseReachable=True" || fail "DatabaseReachable: $DB_REACHABLE"
+CREDS_AVAILABLE=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.status.conditions[?(@.type=="CredentialsAvailable")].status}' 2>/dev/null || echo "")
+[[ "$CREDS_AVAILABLE" == "True" ]] && ok "CredentialsAvailable=True" || fail "CredentialsAvailable: $CREDS_AVAILABLE"
 
 CONFIG_GEN=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.status.conditions[?(@.type=="ConfigGenerated")].status}' 2>/dev/null || echo "")
 [[ "$CONFIG_GEN" == "True" ]] && ok "ConfigGenerated=True" || fail "ConfigGenerated: $CONFIG_GEN"
