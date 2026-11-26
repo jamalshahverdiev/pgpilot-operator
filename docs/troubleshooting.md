@@ -28,6 +28,7 @@ error):
 | `LibraryResolveFailed` | A referenced metric library is missing, see below |
 | `InvalidPreset` | See [Monitor reports InvalidPreset](#monitor-reports-invalidpreset) |
 | `InvalidName` | The monitor's name does not fit the generated objects, see below |
+| `NameConflict` | An object with the name of a generated one exists and is not this monitor's, see below |
 | `ApplyRejected` | The API server, or an admission policy, refused a generated object as invalid, see below |
 | `ApplyFailed`, `ConfigBuildFailed` | The operator could not write or render something; it retries. If it persists, the message and the operator's log say why |
 
@@ -46,7 +47,8 @@ what it is waiting for:
   `Unschedulable`, ...): every minute, to see whether the reason is still the
   same. The end of the problem does not wait for that: a pod that becomes
   ready changes its Deployment, which the operator watches;
-- a missing Secret, Secret key or metric library: every 30 seconds;
+- a missing Secret, Secret key or metric library, and `NameConflict`: every
+  30 seconds;
 - `ApplyRejected`: every five minutes;
 - `InvalidName` and `InvalidPreset`: not until the monitor is changed;
 - `SecretReadFailed`, `ApplyFailed`, `ConfigBuildFailed`: retried with
@@ -115,6 +117,37 @@ a Deployment (without a Service); they are removed with it.
 Until then such a leftover collector keeps running as it is: the operator no
 longer applies anything for the monitor, so a rotated Secret, a change of the
 spec and a new pgwatch version do not reach it.
+
+### NameConflict
+
+Everything the operator generates for a monitor is named after it:
+`pgpilot-<name>` (Deployment, Service, ServiceMonitor) and
+`pgpilot-<name>-config` (ConfigMap). When an object of that kind and name is
+already in the namespace and was not generated for this monitor, the operator
+leaves it exactly as it is and reports the conflict; the message names the
+object and who owns it. It does not write to it, and it would not delete it
+with the monitor.
+
+Delete the object that is in the way (or recreate it under another name), or
+create the monitor under another name. The operator looks again every 30
+seconds.
+
+The message `it is owned by PgpilotMonitor <name>, an earlier object of that
+name that is being removed` appears for a moment when a monitor is deleted and
+created again at once: the objects of the first one are still being garbage
+collected. It clears by itself.
+
+`it has no owner`, about objects that carry the operator's labels, means
+leftovers of an earlier monitor of that name: one deleted with
+`kubectl delete --cascade=orphan`, or objects restored from a backup without
+their owner references. The operator does not take them back. Until they are
+gone the old collector keeps running as it was, and no change of the monitor
+or of its Secret reaches it. Delete them and the operator creates its own:
+
+```bash
+kubectl delete deployment,service,configmap -n <namespace> -l pgpilot.io/monitor=<name>
+kubectl delete servicemonitor -n <namespace> -l pgpilot.io/monitor=<name>   # with the prometheus-operator
+```
 
 ### ApplyRejected
 
@@ -260,6 +293,20 @@ other than the old operator. It leaves the tag alone when
 - the operator runs with `--migrate-stored-image-tag=false`
   (`migrations.storedImageTag: false` in the Helm chart).
 
+A monitor whose tag is kept for one of these reasons may carry the annotation
+`pgpilot.io/operator-wrote-image-tag: "5.1.0"`. The operator writes it when it
+takes its old finalizer off the monitor: the finalizer was half of what showed
+that the tag is an earlier release's and not yours, and the annotation records
+that. With it, the tag is still removed at the next start after you turn the
+option back on or delete the keep annotation. The operator removes the
+annotation when it removes the tag. If you change or remove the tag yourself,
+the annotation stays and means nothing any more (it only counts while the tag
+is still `5.1.0`); delete it if you like:
+
+```bash
+kubectl annotate pgpilotmonitor <name> -n <namespace> pgpilot.io/operator-wrote-image-tag-
+```
+
 At start the operator logs which monitors with tag 5.1.0 it left alone, and
 why (`monitors with image tag 5.1.0 were left as they are`). Two messages in
 the same place point at something to fix first:
@@ -270,6 +317,20 @@ the same place point at something to fix first:
 - `... is invalid` for a monitor - on Kubernetes 1.28 and 1.29 an object that
   breaks a validation rule added since it was stored cannot be changed until
   its spec is corrected.
+
+The same holds for the finalizer of earlier releases, which the operator takes
+off every monitor when it starts: `could not take the finalizer off every
+monitor` in the operator's log, with `... is invalid` for a monitor, names one
+that keeps `pgpilot.io/finalizer` until its spec is corrected. Such a monitor
+is deleted as before this release, by the running operator, and on Kubernetes
+1.28 and 1.29 not at all while it is invalid; see the table under
+"Upgrade notes" in the changelog. To see which monitors still carry a
+finalizer:
+
+```bash
+kubectl get pgpilotmonitors -A \
+  -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'
+```
 
 To move a monitor yourself, remove the tag:
 
@@ -299,11 +360,42 @@ If the ConfigMap content matches your spec, the hash is correct and no rollout i
 
 ## ServiceMonitor not created
 
-The operator checks for `monitoring.coreos.com/v1` CRD at **startup**. If prometheus-operator was installed after the pgpilot-operator, restart the operator:
+The operator checks for the `monitoring.coreos.com/v1` API once, at
+**startup**, and says what it found in its log (`ServiceMonitor CRD detected`
+or `ServiceMonitor CRD not installed`). If the prometheus-operator was
+installed after the pgpilot-operator, restart the operator:
 
 ```bash
 kubectl rollout restart deployment -n pgpilot-system <operator-deployment>
 ```
+
+If the API server cannot answer that question when the operator starts, the
+operator exits and is restarted, rather than run without ServiceMonitors
+until someone notices.
+
+A monitor has a Service and a ServiceMonitor only while its Prometheus sink is
+on (`spec.sinks.prometheus.enabled`, the default). With a gRPC sink alone
+nothing listens on the metrics port, so the operator creates neither and
+removes the ones an earlier spec had.
+
+Monitors that are to have a ServiceMonitor say so in a condition of their own:
+
+```bash
+kubectl get pgpilotmonitor <name> -n <namespace> \
+  -o jsonpath='{.status.conditions[?(@.type=="ServiceMonitorApplied")]}'
+```
+
+`False` with reason `ServiceMonitorAPIMissing` means the cluster stopped
+serving ServiceMonitors while the operator was running (the
+prometheus-operator or its CRDs were removed). The collector is not affected
+and `Ready` does not change. The operator tries again at least every five
+minutes and at every change of the monitor, so the ServiceMonitor comes back
+once the API does; if it was removed for good, restart the operator and the
+condition goes away.
+
+When the Prometheus sink of a monitor is turned off, the operator deletes the
+Service and the ServiceMonitor it had generated and records a
+`ScrapeTargetRemoved` event for each on the monitor.
 
 ## pgwatch pod CrashLoopBackOff
 
@@ -363,6 +455,11 @@ missing).
   [Collector still runs an old pgwatch](#collector-still-runs-an-old-pgwatch-after-an-operator-upgrade)
 - `Warning/PodNotReady` — the pod of a monitor that was ready is no longer
   available
+- `Normal/ScrapeTargetRemoved` — the Service or the ServiceMonitor of a
+  monitor was deleted because its Prometheus sink is off
+- `Warning/ServiceMonitorAPIMissing` — see
+  [ServiceMonitor not created](#servicemonitor-not-created); recorded once
+  when the API goes missing
 - `Warning/<reason>` — for every other reason in the table at the top of this
   page (`ImagePullBackOff`, `CrashLoopBackOff`, `PodCreateFailed`,
   `SecretNotFound`, `InvalidPreset`, ...), with the condition's message

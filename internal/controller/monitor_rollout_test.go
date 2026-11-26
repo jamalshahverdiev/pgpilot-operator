@@ -361,6 +361,79 @@ var _ = Describe("Status of a monitor", func() {
 		expectReady(key, metav1.ConditionFalse, "RolloutInProgress")
 	})
 
+	// The names of the generated objects are predictable. An object that
+	// happened to carry one was rewritten, given the monitor as its owner and
+	// deleted with it. Such objects do not carry the operator's label, so
+	// its cache does not even show them.
+	It("leaves alone what already carries a generated name", func() {
+		theirConfig := &corev1.ConfigMap{Data: map[string]string{"sources.yaml": "theirs"}}
+		theirConfig.Name, theirConfig.Namespace = "pgpilot-taken-config", ns
+		createForSpec(theirConfig)
+		theirService := &corev1.Service{}
+		theirService.Name, theirService.Namespace = "pgpilot-taken", ns
+		theirService.Spec.Selector = map[string]string{"app": "theirs"}
+		theirService.Spec.Ports = []corev1.ServicePort{{Port: 8080}}
+		createForSpec(theirService)
+
+		monitor := minimalMonitor(ns, "taken")
+		createForSpec(monitor)
+		key := client.ObjectKeyFromObject(monitor)
+
+		expectReady(key, metav1.ConditionFalse, "NameConflict",
+			"ConfigMap pgpilot-taken-config already exists", "it has no owner")
+		Eventually(func() []corev1.Event { return eventsOf(key, "NameConflict") }, timeout, interval).
+			Should(ConsistOf(HaveField("Type", corev1.EventTypeWarning)))
+		Consistently(func(g Gomega) {
+			var cm corev1.ConfigMap
+			g.Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(theirConfig), &cm)).To(Succeed())
+			g.Expect(cm.Data).To(Equal(map[string]string{"sources.yaml": "theirs"}))
+			g.Expect(cm.OwnerReferences).To(BeEmpty())
+			g.Expect(cm.Labels).To(BeEmpty())
+			err := k8sClient.Get(context.TODO(), deploymentKey(key), &appsv1.Deployment{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a Deployment without its configuration: %v", err)
+		}, 2*time.Second, interval).Should(Succeed())
+
+		By("the ConfigMap is moved out of the way; the Service is still in it")
+		Expect(k8sClient.Delete(context.TODO(), theirConfig)).To(Succeed())
+		nudge(key)
+		expectReady(key, metav1.ConditionFalse, "NameConflict", "Service pgpilot-taken already exists")
+		Expect(k8sClient.Get(context.TODO(), deploymentKey(key), &appsv1.Deployment{})).To(Succeed())
+		var svc corev1.Service
+		Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(theirService), &svc)).To(Succeed())
+		Expect(svc.Spec.Selector).To(Equal(map[string]string{"app": "theirs"}))
+		Expect(svc.OwnerReferences).To(BeEmpty())
+
+		By("the Service is gone too")
+		Expect(k8sClient.Delete(context.TODO(), theirService)).To(Succeed())
+		nudge(key)
+		expectReady(key, metav1.ConditionFalse, "RolloutInProgress")
+		Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(theirService), &svc)).To(Succeed())
+		Expect(svc.OwnerReferences).To(ConsistOf(HaveField("Name", "taken")))
+	})
+
+	// A Service points at the port of the Prometheus sink. Without the sink
+	// nothing listens there.
+	It("has a Service only while the Prometheus sink is on", func() {
+		monitor := minimalMonitor(ns, "sinks")
+		createForSpec(monitor)
+		key := client.ObjectKeyFromObject(monitor)
+		serviceExists := func() bool {
+			err := k8sClient.Get(context.TODO(), deploymentKey(key), &corev1.Service{})
+			if err != nil {
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "%v", err)
+			}
+			return err == nil
+		}
+		Eventually(serviceExists, timeout, interval).Should(BeTrue())
+
+		setSpec(key, `{"spec":{"sinks":{"prometheus":{"enabled":false},"grpc":{"enabled":true,"endpoint":"receiver.example.com:5000"}}}}`)
+		Eventually(serviceExists, timeout, interval).Should(BeFalse())
+		Expect(k8sClient.Get(context.TODO(), deploymentKey(key), &appsv1.Deployment{})).To(Succeed(), "the collector stays")
+
+		setSpec(key, `{"spec":{"sinks":{"prometheus":{"enabled":true}}}}`)
+		Eventually(serviceExists, timeout, interval).Should(BeTrue())
+	})
+
 	// Releases before 1.1 left status.ready out of a monitor that was not
 	// ready, and the READY column empty. A status write that only carries
 	// what changed would not put it there while the monitor stays not ready.

@@ -8,6 +8,13 @@ metadata:
     {{- include "pgpilot-operator.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if not .Values.leaderElection.enabled }}
+  # Without leader election nothing keeps two operator pods from working at
+  # the same time, and a rolling update runs the old and the new one side by
+  # side until the new one is ready.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       control-plane: controller-manager

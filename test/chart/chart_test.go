@@ -563,6 +563,27 @@ func managerArgs(t *testing.T, objs []object) []string {
 	return args
 }
 
+// Leader election is what keeps the operator pod of the old release from
+// working next to the one of the new release during an upgrade. Without it
+// the old pod has to be gone before the new one starts: an operator of an
+// earlier release puts back, for one, the finalizer this release takes off.
+func TestRender_WithoutLeaderElectionTheOperatorIsReplacedNotRolled(t *testing.T) {
+	strategy := func(args ...string) any {
+		deps := ofKind(render(t, args...), "Deployment")
+		if len(deps) != 1 {
+			t.Fatalf("rendered %d Deployments, want 1", len(deps))
+		}
+		return nested(deps[0], "spec", "strategy")
+	}
+	if got := strategy(); got != nil {
+		t.Errorf("with leader election the strategy is left to the default, got %v", got)
+	}
+	got, _ := strategy("--set", "leaderElection.enabled=false").(object)
+	if len(got) != 1 || got["type"] != "Recreate" {
+		t.Errorf("without leader election: strategy %v, want only type Recreate", got)
+	}
+}
+
 // The interval at which credential Secrets are read again is an operator
 // flag; chart users can only set it through this value.
 func TestRender_CredentialsRecheckInterval(t *testing.T) {

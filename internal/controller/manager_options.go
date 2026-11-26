@@ -88,6 +88,7 @@ func SetupWithManager(mgr ctrl.Manager, opts Options) error {
 
 	if err := (&PgpilotMonitorReconciler{
 		Client:                owned,
+		APIReader:             mgr.GetAPIReader(),
 		Scheme:                mgr.GetScheme(),
 		Recorder:              mgr.GetEventRecorderFor("pgpilot-monitor"), //nolint:staticcheck // SA1019
 		ServiceMonitorEnabled: opts.ServiceMonitorEnabled,
@@ -102,12 +103,22 @@ func SetupWithManager(mgr ctrl.Manager, opts Options) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the PgpilotMetricLibrary controller: %w", err)
 	}
-	if migration := storedImageMigration(mgr, mgr.GetClient(), opts); migration != nil {
-		if err := mgr.Add(migration); err != nil {
-			return fmt.Errorf("set up the stored image migration: %w", err)
-		}
+	if err := mgr.Add(migrations(mgr, mgr.GetClient(), opts)); err != nil {
+		return fmt.Errorf("set up the migrations of stored monitors: %w", err)
 	}
 	return nil
+}
+
+// migrations returns what the manager runs when it starts leading to undo
+// what earlier operator releases left on stored monitors.
+func migrations(src migrationSource, c client.Client, opts Options) *legacyMigrations {
+	return &legacyMigrations{
+		image: storedImageMigration(src, c, opts),
+		finalizers: &FinalizerRelease{
+			Reader: src.GetAPIReader(),
+			Client: client.WithFieldOwner(c, fieldOwner),
+		},
+	}
 }
 
 // migrationSource is the part of a manager the migration is built from.
@@ -116,8 +127,8 @@ type migrationSource interface {
 	GetEventRecorderFor(name string) record.EventRecorder
 }
 
-// storedImageMigration returns the migration the manager runs when it starts
-// leading, or nil when opts turn it off. It reads through the manager's
+// storedImageMigration returns the image migration, or nil when opts turn it
+// off. It reads through the manager's
 // uncached reader, because the cache holds no managedFields, and writes
 // through c under the operator's own name.
 func storedImageMigration(src migrationSource, c client.Client, opts Options) *StoredImageMigration {

@@ -179,9 +179,19 @@ func main() {
 		setupLog.Error(err, "unable to create discovery client")
 		os.Exit(1)
 	}
-	serviceMonitorEnabled := builder.HasServiceMonitorCRD(dc)
-	if serviceMonitorEnabled {
+	serviceMonitorEnabled, err := builder.HasServiceMonitorCRD(dc)
+	switch {
+	case err != nil:
+		// Not knowing is not the same as "not installed": going on would
+		// leave every monitor without its ServiceMonitor until the next
+		// restart. The pod is restarted and asks again.
+		setupLog.Error(err, "unable to find out whether the ServiceMonitor CRD is installed")
+		os.Exit(1)
+	case serviceMonitorEnabled:
 		setupLog.Info("ServiceMonitor CRD detected, will create ServiceMonitor resources")
+	default:
+		setupLog.Info("ServiceMonitor CRD not installed, no ServiceMonitor resources will be created; " +
+			"restart the operator after installing the prometheus-operator to change that")
 	}
 
 	controllerOptions := controller.Options{

@@ -93,7 +93,9 @@ var errTagStillDefaulted = errors.New(
 // the legacy value, the repository is the default one, and the record shows
 // no writer but the old operator: either the old operator owns the field, in
 // the same entry as its finalizer, or nobody does (a default the API server
-// filled in on its own). It keeps its hands off when
+// filled in on its own). Where the finalizer has been taken off since, the
+// annotation FinalizerRelease left in its place counts for it. It keeps its
+// hands off when
 //
 //   - any other writer owns the tag (kubectl, Helm, a GitOps tool), also
 //     together with the old operator,
@@ -226,16 +228,20 @@ func (m *StoredImageMigration) Run(ctx context.Context) (MigrationResult, error)
 	}
 }
 
-// The JSON patch operations the migration uses.
+// The JSON patch operations the migrations use.
 const (
 	jsonPatchTest   = "test"
 	jsonPatchRemove = "remove"
+	jsonPatchAdd    = "add"
 )
+
+// imageTagPath is where the image tag sits in a monitor, as a JSON pointer.
+const imageTagPath = "/spec/image/tag"
 
 type jsonPatchOp struct {
 	Op    string `json:"op"`
 	Path  string `json:"path"`
-	Value string `json:"value,omitempty"`
+	Value any    `json:"value,omitempty"`
 }
 
 // migrate handles one monitor. kept is non-empty when the monitor carries the
@@ -270,14 +276,18 @@ func (m *StoredImageMigration) migrate(
 	// have taken the field over.
 	ops := []jsonPatchOp{
 		{Op: jsonPatchTest, Path: "/metadata/resourceVersion", Value: monitor.ResourceVersion},
-		{Op: jsonPatchTest, Path: "/spec/image/tag", Value: legacyImageTag},
-		{Op: jsonPatchRemove, Path: "/spec/image/tag"},
+		{Op: jsonPatchTest, Path: imageTagPath, Value: legacyImageTag},
+		{Op: jsonPatchRemove, Path: imageTagPath},
 	}
 	if owned.repository && monitor.Spec.Image.Repository != "" {
 		ops = append(ops,
 			jsonPatchOp{Op: jsonPatchTest, Path: "/spec/image/repository", Value: builder.DefaultImageRepository},
 			jsonPatchOp{Op: jsonPatchRemove, Path: "/spec/image/repository"},
 		)
+	}
+	// The note about the tag goes with the tag.
+	if _, noted := monitor.Annotations[AnnotationOperatorWroteImageTag]; noted {
+		ops = append(ops, jsonPatchOp{Op: jsonPatchRemove, Path: tagNotePath})
 	}
 	patch, err := json.Marshal(ops)
 	if err != nil {
@@ -330,6 +340,9 @@ type legacyOwnership struct {
 	tag, repository bool
 	// why names what stands in the way when tag is false.
 	why string
+	// writtenByOperator is true when the record shows that the old operator
+	// wrote the tag, whoever else may own it as well.
+	writtenByOperator bool
 }
 
 // legacyOwnedImageFields reports which of spec.image.tag and
@@ -369,9 +382,17 @@ func legacyOwnedImageFields(monitor *pgpilotv1.PgpilotMonitor) (legacyOwnership,
 		}
 	}
 
+	// Once the finalizer has been taken off, the record no longer shows it.
+	// What it proved was written down at that moment; see FinalizerRelease.
+	if monitor.Spec.Image.Tag == legacyImageTag &&
+		monitor.Annotations[AnnotationOperatorWroteImageTag] == legacyImageTag {
+		legacyOwnsFinalizer = true
+	}
+	written := legacyOwnsTag && legacyOwnsFinalizer
+
 	switch {
 	case len(othersOwnTag) > 0:
-		return legacyOwnership{why: strings.Join(othersOwnTag, ", ")}, nil
+		return legacyOwnership{why: strings.Join(othersOwnTag, ", "), writtenByOperator: written}, nil
 	case legacyOwnsTag && !legacyOwnsFinalizer:
 		return legacyOwnership{why: `a writer called "manager" that is not the operator`}, nil
 	case !legacyOwnsTag && !specIsOwned:
@@ -381,7 +402,7 @@ func legacyOwnedImageFields(monitor *pgpilotv1.PgpilotMonitor) (legacyOwnership,
 	}
 	// Owned by the old operator, or by nobody: a default the API server
 	// filled in, for example on a status update under the old CRD.
-	return legacyOwnership{tag: true, repository: len(othersOwnRepo) == 0}, nil
+	return legacyOwnership{tag: true, repository: len(othersOwnRepo) == 0, writtenByOperator: written}, nil
 }
 
 // hasFieldPath reports whether a managedFields tree contains the given path.

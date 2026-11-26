@@ -212,23 +212,13 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 			}, timeout, interval).Should(BeTrue())
 		})
 
-		It("should set finalizer on the monitor", func() {
-			createForSpec(monitor)
-
-			Eventually(func() bool {
-				var m pgpilotv1.PgpilotMonitor
-				if err := k8sClient.Get(context.TODO(), types.NamespacedName{Name: "test-db", Namespace: ns.Name}, &m); err != nil {
-					return false
-				}
-				return slices.Contains(m.Finalizers, finalizerName)
-			}, timeout, interval).Should(BeTrue())
-		})
-
-		// Adding the finalizer used to be a full Update of the object: the
-		// spec went back as the Go struct serialises it, the API server
-		// filled the empty `image` block with defaults, and the operator
-		// ended up owning fields the user never wrote.
-		It("should add the finalizer without rewriting the spec", func() {
+		// The operator used to put a finalizer on every monitor, with a full
+		// Update of the object: the spec went back as the Go struct
+		// serialises it, the API server filled the empty `image` block with
+		// defaults, and the operator ended up owning fields the user never
+		// wrote. The finalizer protected nothing and made every deletion
+		// wait for a running operator.
+		It("should leave the monitor as the user wrote it: no finalizer, no rewritten spec", func() {
 			// Created the way kubectl sends a manifest: only the fields the
 			// user wrote. (The typed monitor of this suite would itself
 			// send empty `image`, `resources` and metadata blocks.)
@@ -238,12 +228,15 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 			stored := written.DeepCopy()
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(written), stored)).To(Succeed())
-				g.Expect(stored.GetFinalizers()).To(ContainElement(finalizerName))
 				_, hasStatus, _ := unstructured.NestedMap(stored.Object, "status")
 				g.Expect(hasStatus).To(BeTrue(), "wait for a full reconcile")
 			}, timeout, interval).Should(Succeed())
 
-			Expect(stored.GetGeneration()).To(BeEquivalentTo(1), "the spec must not have been written")
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(written), stored)).To(Succeed())
+				g.Expect(stored.GetFinalizers()).To(BeEmpty())
+				g.Expect(stored.GetGeneration()).To(BeEquivalentTo(1), "the spec must not have been written")
+			}, 2*time.Second, interval).Should(Succeed())
 			for _, field := range []string{"image", "resources", "podMetadata", "serviceMetadata"} {
 				_, found, err := unstructured.NestedFieldNoCopy(stored.Object, "spec", field)
 				Expect(err).NotTo(HaveOccurred())
@@ -251,15 +244,28 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 			}
 		})
 
-		It("should release the finalizer when the monitor is deleted", func() {
+		// Nothing of the operator's stands between a delete and its end: the
+		// request itself removes the object, whether the operator runs or
+		// not. With a finalizer the object would still be there, waiting.
+		It("should be gone as soon as it is deleted", func() {
 			createForSpec(monitor)
 			key := types.NamespacedName{Name: "test-db", Namespace: ns.Name}
-
 			Eventually(func(g Gomega) {
 				var m pgpilotv1.PgpilotMonitor
 				g.Expect(k8sClient.Get(context.TODO(), key, &m)).To(Succeed())
-				g.Expect(m.Finalizers).To(ContainElement(finalizerName))
+				g.Expect(m.Status.ObservedGeneration).To(Equal(m.Generation), "wait for a full reconcile")
 			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(context.TODO(), monitor)).To(Succeed())
+			var m pgpilotv1.PgpilotMonitor
+			err := k8sClient.Get(context.TODO(), key, &m)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the monitor is still there after its deletion: %v", err)
+		})
+
+		It("should let go of a monitor that still carries the finalizer of an earlier release", func() {
+			monitor.Finalizers = []string{finalizerName}
+			createForSpec(monitor)
+			key := types.NamespacedName{Name: "test-db", Namespace: ns.Name}
 
 			Expect(k8sClient.Delete(context.TODO(), monitor)).To(Succeed())
 

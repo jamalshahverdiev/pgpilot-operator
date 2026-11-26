@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -77,6 +78,20 @@ type reconcileHarness struct {
 	cached *pgpilotv1.PgpilotMonitor
 	// podListError makes listing the pods fail.
 	podListError error
+	// read lists the kinds of the objects the last reconcile read one by
+	// one; getError is asked before each such read.
+	read     []string
+	getError func(obj client.Object) error
+	// monitorPatches holds the patches sent for the monitor itself, not for
+	// its status; monitorPatchError is what the API server answers to them.
+	monitorPatches    []string
+	monitorPatchError error
+	// deleteError is asked before every delete; deleted lists what was
+	// deleted, as "<Go type> name" ("*v1.Service pgpilot-db"), and
+	// deletedIf what each delete was conditional on, as "Kind uid".
+	deleteError func(obj client.Object) error
+	deleted     []string
+	deletedIf   []string
 	// applied lists the kinds applied, in order.
 	applied []string
 }
@@ -94,6 +109,12 @@ func newReconcileHarness(t *testing.T, monitor *pgpilotv1.PgpilotMonitor, objs .
 					h.cached.DeepCopyInto(m)
 					return nil
 				}
+				h.read = append(h.read, kindOf(obj))
+				if h.getError != nil {
+					if err := h.getError(obj); err != nil {
+						return err
+					}
+				}
 				return c.Get(ctx, key, obj, opts...)
 			},
 			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -102,8 +123,29 @@ func newReconcileHarness(t *testing.T, monitor *pgpilotv1.PgpilotMonitor, objs .
 				}
 				return c.List(ctx, list, opts...)
 			},
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if h.deleteError != nil {
+					if err := h.deleteError(obj); err != nil {
+						return err
+					}
+				}
+				if err := c.Delete(ctx, obj, opts...); err != nil {
+					return err
+				}
+				h.deleted = append(h.deleted, fmt.Sprintf("%T %s", obj, obj.GetName()))
+				h.deletedIf = append(h.deletedIf, kindOf(obj)+" "+uidPrecondition(opts))
+				return nil
+			},
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if patch.Type() != "application/apply-patch+yaml" {
+					if _, isMonitor := obj.(*pgpilotv1.PgpilotMonitor); isMonitor {
+						if data, err := patch.Data(obj); err == nil {
+							h.monitorPatches = append(h.monitorPatches, string(data))
+						}
+						if h.monitorPatchError != nil {
+							return h.monitorPatchError
+						}
+					}
 					return c.Patch(ctx, obj, patch, opts...)
 				}
 				kind := obj.GetObjectKind().GroupVersionKind().Kind
@@ -148,8 +190,19 @@ func newReconcileHarness(t *testing.T, monitor *pgpilotv1.PgpilotMonitor, objs .
 
 func (h *reconcileHarness) reconcile() (ctrl.Result, error) {
 	h.t.Helper()
-	h.applied = nil
+	h.applied, h.deleted, h.deletedIf, h.read = nil, nil, nil, nil
 	return h.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: h.key})
+}
+
+// uidPrecondition returns the UID a delete is conditional on. The fake client
+// does not act on it, so only what was sent can be looked at.
+func uidPrecondition(opts []client.DeleteOption) string {
+	options := &client.DeleteOptions{}
+	options.ApplyOptions(opts)
+	if options.Preconditions == nil || options.Preconditions.UID == nil {
+		return "<unconditional>"
+	}
+	return string(*options.Preconditions.UID)
 }
 
 // monitor returns the monitor as the API server holds it, whatever the

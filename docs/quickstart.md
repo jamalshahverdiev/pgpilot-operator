@@ -165,6 +165,12 @@ kubectl delete namespace demo
 helm uninstall pgpilot-operator -n pgpilot-system
 ```
 
+The order does not matter: monitors carry no finalizer, so they, their
+namespaces and the CRDs can be deleted with the operator already gone.
+(Monitors created by a release before 1.1 lose theirs at the first start of
+this one; see the upgrade notes in the changelog for the one case in which
+they do not.)
+
 `helm uninstall` leaves the `pgpilot.io` CRDs in place on purpose: deleting them
 would delete every PgpilotMonitor and PgpilotMetricLibrary in the cluster. Remove
 them explicitly once nothing depends on them:

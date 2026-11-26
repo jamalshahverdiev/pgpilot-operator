@@ -166,8 +166,8 @@ CREDS_AVAILABLE=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='
 CONFIG_GEN=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.status.conditions[?(@.type=="ConfigGenerated")].status}' 2>/dev/null || echo "")
 [[ "$CONFIG_GEN" == "True" ]] && ok "ConfigGenerated=True" || fail "ConfigGenerated: $CONFIG_GEN"
 
-FINALIZER=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.metadata.finalizers[0]}' 2>/dev/null || echo "")
-[[ "$FINALIZER" == "pgpilot.io/finalizer" ]] && ok "Finalizer set" || fail "Finalizer: $FINALIZER"
+FINALIZERS=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || echo "?")
+[[ -z "$FINALIZERS" ]] && ok "No finalizer on the monitor" || fail "Finalizers: $FINALIZERS"
 
 OBS_GEN=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || echo "0")
 [[ "$OBS_GEN" -ge 1 ]] && ok "observedGeneration >= 1" || fail "observedGeneration: $OBS_GEN"

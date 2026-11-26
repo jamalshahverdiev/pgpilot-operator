@@ -1,22 +1,35 @@
 package builder
 
 import (
+	"fmt"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/discovery"
 )
 
-// HasServiceMonitorCRD checks whether the monitoring.coreos.com/v1 API
-// (prometheus-operator ServiceMonitor) is registered in the cluster.
-// This is called once at operator startup to decide whether to generate
-// ServiceMonitor resources during reconciliation.
-func HasServiceMonitorCRD(dc discovery.DiscoveryInterface) bool {
-	resources, err := dc.ServerResourcesForGroupVersion("monitoring.coreos.com/v1")
+// serviceMonitorGroupVersion is the API the prometheus-operator serves its
+// ServiceMonitor under.
+const serviceMonitorGroupVersion = "monitoring.coreos.com/v1"
+
+// HasServiceMonitorCRD reports whether the cluster serves the ServiceMonitor
+// of the prometheus-operator. It is asked once, when the operator starts, to
+// decide whether ServiceMonitors are generated and watched.
+//
+// Only "the API server does not know that group" means no. Any other failure
+// is returned: taking it for a no would leave every monitor without its
+// ServiceMonitor until the next restart, with nothing to say why.
+func HasServiceMonitorCRD(dc discovery.DiscoveryInterface) (bool, error) {
+	resources, err := dc.ServerResourcesForGroupVersion(serviceMonitorGroupVersion)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return false, fmt.Errorf("ask the API server for %s: %w", serviceMonitorGroupVersion, err)
 	}
 	for _, r := range resources.APIResources {
 		if r.Kind == "ServiceMonitor" {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

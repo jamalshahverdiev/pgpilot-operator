@@ -47,7 +47,7 @@ scrape_configs:
 
 ## ServiceMonitor (prometheus-operator)
 
-If prometheus-operator is installed, pgpilot-operator auto-detects it and creates a `ServiceMonitor` for each `PgpilotMonitor`.
+If prometheus-operator is installed, pgpilot-operator auto-detects it and creates a `ServiceMonitor` for each `PgpilotMonitor` whose Prometheus sink is enabled (the default).
 
 No extra configuration needed. The ServiceMonitor:
 - Selects the pgwatch Service by labels

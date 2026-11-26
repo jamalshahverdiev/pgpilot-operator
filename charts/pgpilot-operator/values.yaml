@@ -17,6 +17,9 @@ serviceAccount:
 rbac:
   create: true
 
+# With leader election off the operator is replaced, not rolled, on an
+# upgrade (Deployment strategy Recreate): two operator pods of different
+# releases must not work on the same monitors at once.
 leaderElection:
   enabled: true
 

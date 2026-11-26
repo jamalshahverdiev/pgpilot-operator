@@ -28,7 +28,7 @@ PgpilotMonitor CR
   │  4. Generate ConfigMap (sources.yaml +  │
   │     metrics.yaml + SHA-256 hash)        │
   │  5. Generate Deployment (1 replica)     │
-  │  6. Generate Service (ClusterIP)        │
+  │  6. Generate Service (Prometheus sink)  │
   │  7. Generate ServiceMonitor (optional)  │
   │  8. Update status + conditions          │
   └─────────────────────────────────────────┘
@@ -41,7 +41,7 @@ PgpilotMonitor CR
   └───────────────┘  └────────────────┘  └──────────┘  └────────────────┘
 ```
 
-All child resources have `OwnerReferences` pointing to the `PgpilotMonitor`, so garbage collection is automatic on deletion.
+All child resources have `OwnerReferences` pointing to the `PgpilotMonitor`, so garbage collection is automatic on deletion. The Service and the ServiceMonitor exist only while the monitor's Prometheus sink is on.
 
 ## ConfigMap content
 
@@ -152,4 +152,14 @@ A namespace-scoped CR containing reusable metric definitions. It has its own con
 
 ## ServiceMonitor detection
 
-At startup, the operator checks (via discovery API) whether the `monitoring.coreos.com/v1` CRD exists. If yes, it creates a `ServiceMonitor` for each `PgpilotMonitor` that selects the pgwatch Service. If the CRD is absent, no ServiceMonitor is created and no error is reported.
+At startup, the operator checks (via discovery API) whether the `monitoring.coreos.com/v1` CRD exists, and logs the answer. If yes, it creates a `ServiceMonitor` for each `PgpilotMonitor` whose Prometheus sink is on, selecting the pgwatch Service. If the CRD is absent, no ServiceMonitor is created and no error is reported. If the question cannot be answered, the operator exits and is restarted.
+
+Should the CRD be removed while the operator runs, monitors keep being reconciled; each reports it in its `ServiceMonitorApplied` condition.
+
+## Deletion
+
+A PgpilotMonitor carries no finalizer. Everything generated for it lives in its namespace and is owned by it, so the Kubernetes garbage collector removes it when the monitor is deleted, whether the operator is running or not. Releases before 1.1 put `pgpilot.io/finalizer` on every monitor; the operator takes it off again when it starts. The one exception is a monitor from such a release that breaks a validation rule added since, on Kubernetes 1.28 and 1.29: the API server refuses every write to it, this one included, until its spec is corrected.
+
+## Names
+
+The generated objects are called `pgpilot-<monitor>` and `pgpilot-<monitor>-config`. Before the operator writes one it looks whether the name is taken: in its cache, and at the API server for what the cache does not hold. An object that is there and not controlled by the monitor is not written to and not deleted; the monitor reports `NameConflict` instead. Looking and writing are two requests, so this protects what exists, not an object created under the name in the instant between them.
