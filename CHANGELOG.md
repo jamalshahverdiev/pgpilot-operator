@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+### Status that says what is running
+
+- `Ready` now means that the pgwatch pod **of the current spec** is running
+  and available. It used to be true as soon as the Deployment had one ready
+  replica, and during a rollout that replica is the pod of the previous spec:
+  a change whose pod could never start (image typo, a Secret key that does not
+  exist, resources no node can give) left the monitor at `READY=true` for
+  good, at the new generation, while the old configuration kept running.
+- When a monitor is not ready, the `Ready` condition says why:
+  `RolloutInProgress`, `PodNotReady`, `ImagePullBackOff`, `CrashLoopBackOff`,
+  `CreateContainerConfigError`, `Unschedulable`, `PodCreateFailed` (quota, Pod
+  Security), `RolloutStuck`, with the pod's or the API server's message. It
+  was always `PodNotReady: pgwatch pod is not ready yet`.
+- Every way a reconcile can end writes one consistent status. `status.ready`
+  always says what the `Ready` condition says; `observedGeneration` is always
+  the generation that was looked at; a condition the reconcile did not get to
+  (for example `ConfigGenerated` while the Secret is missing) is `Unknown`
+  instead of whatever was left from before; `status.podName` names a pod that
+  runs now, a ready one first, and is empty when none runs.
+- A pod is judged by what it is doing now. A container that exited once and
+  is being restarted is `PodNotReady` with the exit code in the message, and
+  `CrashLoopBackOff` only from the second restart or on the kubelet's word.
+  Init containers that ran to their end (as service meshes inject them), pods
+  that failed for good and wait to be garbage collected, and pods of a
+  previous spec are not mistaken for the pod that is starting.
+- Failures after the configuration is rendered are reported. An object
+  refused as invalid (`ApplyRejected`, e.g. a memory request above its limit,
+  or an admission policy that denies the Deployment) and any other failed
+  write (`ApplyFailed`) used to be an error in the operator's log and nothing
+  else. A refused object is sent again every five minutes and whenever the
+  monitor changes; other failures are retried with backoff as before.
+- A monitor whose name the generated Service cannot carry (more than 55
+  characters, or a dot) is reported with `InvalidName` and nothing is
+  generated for it. With a dot, or with 56 to 63 characters, it used to get a
+  ConfigMap and a Deployment and then fail on the Service indefinitely, with
+  an empty status; with a longer name nothing could be created at all.
+- Events are recorded when the `Ready` condition changes, not on every look.
+  A monitor waiting for its Secret produced a `SecretNotFound` event every 30
+  seconds.
+- The status is written only when it changes. `status.lastReconciled` is the
+  time of the last change, not a heartbeat. `status.ready` is part of every
+  such write, so a monitor that an earlier release left without the field
+  gets it.
+- A monitor whose collector is held up (`ImagePullBackOff`,
+  `CrashLoopBackOff`, `Unschedulable`, ...) is looked at once a minute; one
+  that is rolling out or starting, every 15 seconds.
+
+Upgrade notes:
+
+- Tools that wait for `status.ready` or `Ready=True` now wait for the rollout
+  to finish. A monitor whose last change never rolled out, and which showed
+  `READY=true` regardless, turns `false` with the reason; its old pod is not
+  touched.
+- `READY` is `false` for the duration of every rollout, also the one a
+  rotated Secret or an operator upgrade causes, while the previous pod keeps
+  collecting. Give alerts on `Ready=False` a hold time of a few minutes.
+- `Ready=True` has the message `pgwatch pod is running` (was `... running and
+  scraping`; the operator does not know whether it scrapes).
+- Monitors with a name longer than 55 characters or containing a dot: see
+  `InvalidName` in docs/troubleshooting.md. The operator stops applying
+  anything for them: their existing pod keeps running, but a rotated Secret,
+  a change of the spec and the move to pgwatch 6.2.0 no longer reach it.
+  Recreate the monitor under a shorter name. To find them before upgrading:
+
+  ```bash
+  kubectl get pgpilotmonitors -A --no-headers \
+    -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name |
+    awk 'length($2) > 55 || $2 ~ /\./'
+  ```
+- Alerts on `Warning` events of PgpilotMonitors see one event per problem
+  instead of a growing count. At the upgrade, a monitor whose problem was not
+  reported before (a rollout that never finished, an invalid name) records
+  one `Warning` event.
+
 ### pgwatch 6.2.0
 
 Collectors now run pgwatch 6.2.0 instead of 5.1.0, and the metric definitions

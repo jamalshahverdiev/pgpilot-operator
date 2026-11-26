@@ -219,15 +219,18 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 		Expect(list.Items).To(HaveLen(len(stale)))
 	})
 
-	// The operator writes status on every reconcile. Before Kubernetes 1.33
-	// that write is refused for an object breaking a rule, even though the
-	// spec did not change.
+	// The operator writes the status whenever it changes, the way this does:
+	// a merge patch of the status subresource against the version it read.
+	// Before Kubernetes 1.33 that write is refused for an object breaking a
+	// rule, even though the spec did not change.
 	It("writes their status where the API server ratchets status updates", func() {
 		for name := range stale {
 			var monitor pgpilotv1.PgpilotMonitor
 			Expect(c.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: ns}, &monitor)).To(Succeed())
+			stored := monitor.DeepCopy()
 			monitor.Status.ConfigHash = "after-upgrade"
-			err := c.Status().Update(context.TODO(), &monitor)
+			err := c.Status().Patch(context.TODO(), &monitor,
+				client.MergeFromWithOptions(stored, client.MergeFromWithOptimisticLock{}))
 
 			if ratchetsStatus {
 				Expect(err).NotTo(HaveOccurred(), "%s: status update must be accepted", name)

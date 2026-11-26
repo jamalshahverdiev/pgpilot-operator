@@ -192,7 +192,17 @@ var _ = Describe("pgwatch image of a monitor", func() {
 			monitor.SetFinalizers([]string{finalizerName})
 			Expect(legacy.Create(context.TODO(), monitor)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(context.TODO(), monitor) })
-			return client.ObjectKeyFromObject(monitor)
+			key := client.ObjectKeyFromObject(monitor)
+			// The suite's manager reconciles the new monitor and writes its
+			// status. The migration patches against the version it listed
+			// and tries again later when that version is gone; these specs
+			// run it once, so that write has to have landed.
+			Eventually(func(g Gomega) {
+				var stored pgpilotv1.PgpilotMonitor
+				g.Expect(k8sClient.Get(context.TODO(), key, &stored)).To(Succeed())
+				g.Expect(stored.Status.ObservedGeneration).To(Equal(stored.Generation))
+			}, timeout, interval).Should(Succeed())
+			return key
 		}
 
 		BeforeEach(func() {

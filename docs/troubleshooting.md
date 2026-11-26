@@ -8,7 +8,52 @@
 kubectl describe pgpilotmonitor <name> -n <namespace>
 ```
 
-Look at the `Conditions` section. Common causes:
+`Ready` is true when the pgwatch pod **of the current spec** is running and
+available. Otherwise the reason of the `Ready` condition says what is in the
+way, and the message carries the detail (pod name, image, the API server's
+error):
+
+| Reason | Meaning |
+|--------|---------|
+| `PodRunning` | `Ready` is true: the pod of the current spec is running and available |
+| `RolloutInProgress` | The Deployment is being rolled out. If the monitor was healthy before, the pod of the previous spec keeps collecting until the new one is up |
+| `PodNotReady` | The pod of the current spec exists and has not become ready yet. If its container exited once and is being restarted (a node that restarted, one out-of-memory kill), the message says so, with the exit code |
+| `ImagePullBackOff` | The pod cannot pull its image: wrong `spec.image`, a registry that needs credentials, or no network path to it |
+| `CrashLoopBackOff` | pgwatch keeps starting and exiting. See its last words with `kubectl logs -l pgpilot.io/monitor=<name> --previous` |
+| `CreateContainerConfigError`, `CreateContainerError`, `RunContainerError` | The kubelet cannot start the container; the message says why |
+| `Unschedulable` | No node can take the pod: requests too large, taints, node selectors |
+| `PodCreateFailed` | No pod could be created at all: a ResourceQuota, a LimitRange, Pod Security admission. The message is the API server's |
+| `RolloutStuck` | The rollout made no progress for ten minutes and nothing more specific is known. Look at `kubectl describe deploy,rs,pod -l pgpilot.io/monitor=<name>` |
+| `SecretNotFound`, `SecretKeyMissing`, `SecretReadFailed`, `NoCredentials` | Credentials, see below |
+| `LibraryResolveFailed` | A referenced metric library is missing, see below |
+| `InvalidPreset` | See [Monitor reports InvalidPreset](#monitor-reports-invalidpreset) |
+| `InvalidName` | The monitor's name does not fit the generated objects, see below |
+| `ApplyRejected` | The API server, or an admission policy, refused a generated object as invalid, see below |
+| `ApplyFailed`, `ConfigBuildFailed` | The operator could not write or render something; it retries. If it persists, the message and the operator's log say why |
+
+`status.ready` and the READY column of `kubectl get pm` always say the same as
+this condition. While a change cannot be rolled out the monitor is not ready
+although the previous pod still runs and collects: what you asked for is not
+what is running. `status.podName` names the pod that runs.
+
+How soon the operator looks again at a monitor that is not ready depends on
+what it is waiting for:
+
+- a collector that is being rolled out or starting (`RolloutInProgress`,
+  `PodNotReady`): every 15 seconds, so a reason that only shows on the pod
+  can take that long to appear;
+- a collector that is held up (`ImagePullBackOff`, `CrashLoopBackOff`,
+  `Unschedulable`, ...): every minute, to see whether the reason is still the
+  same. The end of the problem does not wait for that: a pod that becomes
+  ready changes its Deployment, which the operator watches;
+- a missing Secret, Secret key or metric library: every 30 seconds;
+- `ApplyRejected`: every five minutes;
+- `InvalidName` and `InvalidPreset`: not until the monitor is changed;
+- `SecretReadFailed`, `ApplyFailed`, `ConfigBuildFailed`: retried with
+  growing pauses, from milliseconds up to about a quarter of an hour.
+
+A change of the monitor's spec, labels or annotations is looked at at once in
+every case.
 
 ### SecretNotFound
 
@@ -42,20 +87,57 @@ Fix: create the library or remove the reference.
 
 ### PodNotReady
 
-The pgwatch pod exists but has not passed its readiness probe. Check pod logs:
+The pgwatch pod of the current spec exists but has not passed its readiness
+probe. Usually it was created only a moment ago; the probe starts after a few
+seconds. If it stays, look at the pod:
 
 ```bash
+kubectl describe pod -n <namespace> -l pgpilot.io/monitor=<name>
 kubectl logs -n <namespace> -l pgpilot.io/monitor=<name>
 ```
-
-Common causes:
-- The pod cannot be scheduled or its image cannot be pulled
-  (`kubectl describe pod`)
-- The pod was created only a moment ago; the probe starts after a few seconds
 
 A database that cannot be reached, a wrong password or a wrong `sslmode` do
 **not** make the pod unready: pgwatch keeps running and retries. See
 [Monitor is Ready but there are no metrics](#monitor-is-ready-but-there-are-no-metrics).
+
+### InvalidName
+
+The objects generated for a monitor are named after it: the Service is
+`pgpilot-<name>`, and a Service name may have at most 63 characters and no
+dots. A monitor called `db.prod`, or with a name longer than 55 characters,
+cannot get one. Nothing is generated for it.
+
+A name cannot be changed. Create the monitor again under a name of at most 55
+characters made of lower-case letters, digits and `-`, and delete this one. If
+it was created by an older operator release it may still have a ConfigMap and
+a Deployment (without a Service); they are removed with it.
+
+Until then such a leftover collector keeps running as it is: the operator no
+longer applies anything for the monitor, so a rotated Secret, a change of the
+spec and a new pgwatch version do not reach it.
+
+### ApplyRejected
+
+One of the generated objects was refused as invalid; the message names the
+object and repeats the reason given. There are two kinds of cause:
+
+- a value the PgpilotMonitor accepts and Kubernetes does not, for example
+  `spec.resources` with a request above its limit. Correct the spec; the
+  operator applies the new one at once;
+- something in the cluster that refuses the object although the spec is fine:
+  a ValidatingAdmissionPolicy (the message names it), an admission webhook
+  that answers "invalid", or an installed ServiceMonitor CRD older than what
+  the operator sends. Nothing on the monitor has to change for these.
+
+The operator sends the object again every five minutes, so a monitor recovers
+on its own once the cause is gone. To have it try at once, touch the monitor:
+
+```bash
+kubectl annotate pgpilotmonitor <name> -n <namespace> retry="$(date +%s)" --overwrite
+```
+
+While a monitor is `ApplyRejected` the collector it already has keeps running
+as it was; a rotated Secret is not rolled out to it.
 
 ### SecretKeyMissing
 
@@ -264,24 +346,30 @@ The operator records Kubernetes events on PgpilotMonitor resources:
 kubectl get events -n <namespace> --field-selector involvedObject.name=<monitor-name>
 ```
 
-Event types. The `Normal` ones are emitted on transitions; the `Warning` ones
-about credentials are repeated each time the operator looks again (every 30
-seconds while the problem lasts; Kubernetes folds repeats into one event with
-a count):
+An event is recorded when the `Ready` condition changes its status or reason,
+not each time the operator looks: a monitor that waits ten minutes for its
+Secret has one `SecretNotFound` event, not twenty. A problem with the same
+reason is announced again only when the spec was changed and the message is
+another one (a second preset that does not exist, another Secret that is
+missing).
 
-- `Normal/ConfigMapUpdated` — generated ConfigMap hash changed (i.e. rollout
+- `Normal/ConfigMapUpdated` — the generated ConfigMap changed (i.e. a rollout
   is about to happen)
-- `Normal/PodRunning` — pgwatch pod became Ready after being NotReady
-- `Warning/PodNotReady` — pgwatch pod lost readiness after being Ready
-- `Warning/SecretNotFound` — referenced `credentialsSecret` doesn't exist
-- `Warning/SecretKeyMissing` — the Secret has no value under the username or password key
-- `Warning/SecretReadFailed` — the Secret could not be read from the API server
-- `Warning/NoCredentials` — the monitor has neither inline credentials nor a `credentialsSecret`
-- `Warning/LibraryResolveFailed` — a referenced `PgpilotMetricLibrary` is missing
+- `Normal/PodRunning` — the pod of the current spec is running and available
+- `Normal/RolloutInProgress` — a monitor that was ready is rolling out a new
+  pod: a changed spec, a rotated Secret, an operator upgrade that changes the
+  pod
+- `Normal/ImageDefaultRestored` — see
+  [Collector still runs an old pgwatch](#collector-still-runs-an-old-pgwatch-after-an-operator-upgrade)
+- `Warning/PodNotReady` — the pod of a monitor that was ready is no longer
+  available
+- `Warning/<reason>` — for every other reason in the table at the top of this
+  page (`ImagePullBackOff`, `CrashLoopBackOff`, `PodCreateFailed`,
+  `SecretNotFound`, `InvalidPreset`, ...), with the condition's message
 
-The absence of a `PodRunning` event does not mean the pod is down —
-events are only fired on transitions to reduce noise. Check
-`status.ready` / `status.conditions` for the current state.
+A new monitor on its way up (`RolloutInProgress`, `PodNotReady`) records
+nothing until it is ready or something is wrong. Check `status.conditions` for
+the current state; events expire.
 
 Condition reasons on `CredentialsAvailable`:
 
