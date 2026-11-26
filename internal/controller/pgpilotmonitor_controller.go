@@ -22,6 +22,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -34,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,9 +62,6 @@ const (
 	// conditionConfigGenerated reports whether the collector's
 	// configuration could be rendered from the spec.
 	conditionConfigGenerated = "ConfigGenerated"
-	// reasonInvalidPreset is set when spec.metrics.preset names a preset
-	// the collector cannot gather from a PostgreSQL database.
-	reasonInvalidPreset = "InvalidPreset"
 	// legacyConditionDatabaseReachable is the name the condition above had
 	// in earlier releases. Nothing ever connected to the database to set it,
 	// so the name promised more than it checked.
@@ -96,7 +94,16 @@ type PgpilotMonitorReconciler struct {
 	// CredentialsRetry is how long to wait before looking again for a Secret
 	// that is missing or lacks a key. Zero means thirty seconds.
 	CredentialsRetry time.Duration
+
+	// replaced holds, per monitor, the resourceVersion the operator's last
+	// status write replaced; see readIsStale.
+	replaced sync.Map
 }
+
+// buildConfigMap renders the collector's configuration. A variable so that a
+// test can make the rendering fail, which the embedded metric definitions
+// never do.
+var buildConfigMap = builder.BuildConfigMap
 
 func (r *PgpilotMonitorReconciler) credentialsRecheck() time.Duration {
 	if r.CredentialsRecheck > 0 {
@@ -129,9 +136,16 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	var monitor pgpilotv1.PgpilotMonitor
 	if err := r.Get(ctx, req.NamespacedName, &monitor); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.replaced.Delete(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+	// The cache still shows the monitor from before the operator's own last
+	// status write: whatever is concluded from it would be compared with a
+	// status that is no longer the stored one.
+	if r.readIsStale(&monitor) {
+		return ctrl.Result{RequeueAfter: staleReadRetry}, nil
 	}
 
 	// Handle deletion via finalizer.
@@ -147,132 +161,156 @@ func (r *PgpilotMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	// --- Step 1: Validate credentials source. ---
-	creds, result, err := r.resolveCredentials(ctx, &monitor)
-	if err != nil {
-		return ctrl.Result{}, err
+	// The status is worked out in memory and written once, in finish; stored
+	// is what it is compared with.
+	stored := monitor.DeepCopy()
+	status := newMonitorStatus(&monitor)
+	return r.finish(ctx, stored, status, r.sync(ctx, status))
+}
+
+// sync brings the generated objects in line with the monitor's spec and
+// reports where the monitor stands. It records the conditions of the steps it
+// gets through in status; it writes no status and records no Ready event
+// itself.
+func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStatus) outcome {
+	monitor := status.monitor
+	meta.RemoveStatusCondition(&monitor.Status.Conditions, legacyConditionDatabaseReachable)
+
+	// --- Step 0: the name has to work for everything derived from it. ---
+	if err := builder.ValidateMonitorName(monitor.Name); err != nil {
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, reasonInvalidName, err.Error())
+		return outcome{reason: reasonInvalidName, message: err.Error()}
 	}
-	if !creds.usable {
-		return result, nil
+
+	// --- Step 1: Validate credentials source. ---
+	creds, stop := r.resolveCredentials(ctx, status)
+	if stop != nil {
+		return *stop
 	}
 
 	// --- Step 2: Resolve metric libraries. ---
-	libraries, err := r.resolveLibraries(ctx, &monitor)
+	libraries, err := r.resolveLibraries(ctx, monitor)
 	if err != nil {
-		return r.librariesUnavailable(ctx, &monitor, err), nil
+		message := "Failed to resolve metric libraries: " + err.Error()
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, reasonLibraryResolveFailed, message)
+		out := outcome{reason: reasonLibraryResolveFailed, message: message, requeueAfter: libraryRetry}
+		if !apierrors.IsNotFound(err) {
+			// Not a library that is missing, but one that could not be
+			// read: that is the operator's problem, to be retried.
+			out.err, out.requeueAfter = err, 0
+		}
+		return out
 	}
 
 	// --- Step 3: Merge metrics. ---
 	merged := builder.MergeMetrics(monitor.Spec.Metrics, libraries)
 
 	// --- Step 4: Build ConfigMap. ---
-	desiredCM, configHash, err := builder.BuildConfigMap(&monitor, merged)
-	if errors.Is(err, builder.ErrInvalidPreset) {
+	desiredCM, configHash, err := buildConfigMap(monitor, merged)
+	switch {
+	case errors.Is(err, builder.ErrInvalidPreset):
 		// A mistake in the spec: retrying cannot fix it, and the next
 		// change of the spec starts a new reconcile anyway.
-		r.configInvalid(ctx, &monitor, reasonInvalidPreset, err.Error())
-		return ctrl.Result{}, nil
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, reasonInvalidPreset, err.Error())
+		return outcome{reason: reasonInvalidPreset, message: err.Error()}
+	case err != nil:
+		message := "The collector configuration could not be rendered: " + err.Error()
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, reasonConfigBuildFailed, message)
+		return outcome{reason: reasonConfigBuildFailed, message: message, err: fmt.Errorf("build configmap: %w", err)}
 	}
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("build configmap: %w", err)
-	}
-	if err := ctrl.SetControllerReference(&monitor, desiredCM, r.Scheme); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.serverSideApply(ctx, desiredCM); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
+	if stop := r.apply(ctx, monitor, desiredCM); stop != nil {
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, stop.reason, stop.message)
+		return *stop
 	}
 
-	r.setCondition(&monitor, conditionConfigGenerated, metav1.ConditionTrue, "ConfigMapUpdated",
+	status.set(conditionConfigGenerated, metav1.ConditionTrue, "ConfigMapUpdated",
 		fmt.Sprintf("ConfigMap %s up to date (hash=%s)", desiredCM.Name, configHash[:12]))
 	if monitor.Status.ConfigHash != configHash {
-		r.Recorder.Eventf(&monitor, corev1.EventTypeNormal, "ConfigMapUpdated",
+		status.event(corev1.EventTypeNormal, "ConfigMapUpdated",
 			"ConfigMap %s reconciled (hash=%s)", desiredCM.Name, configHash[:12])
 		monitor.Status.ConfigHash = configHash
 	}
 
 	// --- Step 5: Build Deployment. ---
-	desiredDep := builder.BuildDeployment(&monitor, merged, builder.PodTemplateVersions{
+	deployment := builder.BuildDeployment(monitor, merged, builder.PodTemplateVersions{
 		Config:      configHash,
 		Credentials: creds.version,
 	})
-	if err := ctrl.SetControllerReference(&monitor, desiredDep, r.Scheme); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.serverSideApply(ctx, desiredDep); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile deployment: %w", err)
+	if stop := r.apply(ctx, monitor, deployment); stop != nil {
+		return *stop
 	}
 
 	// --- Step 6: Build Service. ---
-	desiredSvc := builder.BuildService(&monitor)
-	if err := ctrl.SetControllerReference(&monitor, desiredSvc, r.Scheme); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.serverSideApply(ctx, desiredSvc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile service: %w", err)
+	if stop := r.apply(ctx, monitor, builder.BuildService(monitor)); stop != nil {
+		return *stop
 	}
 
 	// --- Step 6b: Build ServiceMonitor (if prometheus-operator CRD present). ---
 	if r.ServiceMonitorEnabled {
-		desiredSM := builder.BuildServiceMonitor(&monitor)
-		if err := ctrl.SetControllerReference(&monitor, desiredSM, r.Scheme); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.serverSideApply(ctx, desiredSM); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile servicemonitor: %w", err)
+		if stop := r.apply(ctx, monitor, builder.BuildServiceMonitor(monitor)); stop != nil {
+			return *stop
 		}
 	}
 
-	// --- Step 7: Read Deployment status and update Monitor status. ---
-	var currentDep appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: desiredDep.Name, Namespace: desiredDep.Namespace}, &currentDep); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	wasReady := monitor.Status.Ready
-	ready := currentDep.Status.ReadyReplicas > 0
-	monitor.Status.Ready = ready
-	monitor.Status.ObservedGeneration = monitor.Generation
-	monitor.Status.LastReconciled = &metav1.Time{Time: time.Now()}
-
-	if ready {
-		r.setCondition(&monitor, "Ready", metav1.ConditionTrue, "PodRunning", "pgwatch pod running and scraping")
-		if !wasReady {
-			r.Recorder.Event(&monitor, corev1.EventTypeNormal, "PodRunning", "pgwatch pod running and scraping")
-		}
-	} else {
-		r.setCondition(&monitor, "Ready", metav1.ConditionFalse, "PodNotReady", "pgwatch pod is not ready yet")
-		if wasReady {
-			r.Recorder.Event(&monitor, corev1.EventTypeWarning, "PodNotReady", "pgwatch pod is not ready yet")
-		}
-	}
-
-	// Try to find the pod name.
-	var podList corev1.PodList
-	if err := r.List(ctx, &podList,
-		client.InNamespace(monitor.Namespace),
-		client.MatchingLabels{
-			builder.LabelAppInstance: monitor.Name,
-			builder.LabelAppName:     builder.AppName,
-		},
-	); err == nil && len(podList.Items) > 0 {
-		monitor.Status.PodName = podList.Items[0].Name
-	}
-
-	if err := r.patchStatus(ctx, &monitor); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
-	}
-
-	if !ready {
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-	}
-	if creds.fromSecret {
+	// --- Step 7: Where does the rollout stand? ---
+	// The apply above returned the Deployment as the API server holds it
+	// now. A read from the cache could still show the Deployment from before
+	// the apply, complete and available, and pass it off as the new one.
+	pods, _ := r.collectorPods(ctx, status)
+	ready, reason, message := collectorState(deployment, pods)
+	out := outcome{ready: ready, reason: reason, message: message}
+	switch {
+	case !ready && transitional[reason]:
+		out.requeueAfter = notReadyRequeue
+	case !ready:
+		out.requeueAfter = stuckRequeue
+	case creds.fromSecret:
 		// Come back to read the Secret again; see CredentialsRecheck. The
 		// jitter keeps the monitors from all coming due in the same instant
 		// after the operator has started.
-		return ctrl.Result{RequeueAfter: wait.Jitter(r.credentialsRecheck(), recheckJitter)}, nil
+		out.requeueAfter = wait.Jitter(r.credentialsRecheck(), recheckJitter)
 	}
-	return ctrl.Result{}, nil
+	return out
+}
+
+// apply writes one generated object, owned by the monitor. It returns nil
+// when the object is in place and otherwise how the reconcile ends.
+//
+// An object the API server refuses as invalid will be refused again however
+// often it is sent, as long as nothing changes: that is reported as a state,
+// not as a failed reconcile. It is sent again when the spec changes and
+// otherwise every rejectedRetry, because what refused it need not be the
+// spec: an admission policy answers the same way. Any other failure is handed
+// to the work queue to be retried with backoff.
+func (r *PgpilotMonitorReconciler) apply(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+	obj client.Object,
+) *outcome {
+	// Read before the object is sent: the client clears it in the answer.
+	kind := obj.GetObjectKind().GroupVersionKind().Kind
+	what := fmt.Sprintf("%s %s", kind, obj.GetName())
+
+	err := ctrl.SetControllerReference(monitor, obj, r.Scheme)
+	if err == nil {
+		err = r.serverSideApply(ctx, obj)
+	}
+	switch {
+	case err == nil:
+		return nil
+	case apierrors.IsInvalid(err):
+		return &outcome{
+			reason:       reasonApplyRejected,
+			message:      fmt.Sprintf("%s was rejected by the API server: %v", what, err),
+			requeueAfter: wait.Jitter(rejectedRetry, recheckJitter),
+		}
+	default:
+		return &outcome{
+			reason:  reasonApplyFailed,
+			message: fmt.Sprintf("%s could not be applied: %v", what, err),
+			err:     fmt.Errorf("reconcile %s: %w", strings.ToLower(kind), err),
+		}
+	}
 }
 
 // patchFinalizer adds or removes the operator's finalizer with a patch that
@@ -302,9 +340,6 @@ func (r *PgpilotMonitorReconciler) patchFinalizer(
 
 // credentials is what resolveCredentials found out about a monitor.
 type credentials struct {
-	// usable is false when the collector pod could not start with what is
-	// configured; the reconcile then stops and is retried later.
-	usable bool
 	// fromSecret is true when the credentials come from a referenced Secret.
 	fromSecret bool
 	// version changes whenever that Secret changes; empty for inline
@@ -314,28 +349,37 @@ type credentials struct {
 
 // resolveCredentials checks that the monitor has credentials the collector
 // pod can start with: an inline username and password, or a Secret in the
-// monitor's namespace that holds a value under both configured keys.
+// monitor's namespace that holds a value under both configured keys. When it
+// has not, the second result says how the reconcile ends.
 //
 // It does not check that the database accepts them. pgwatch keeps running and
 // retrying when it cannot log in, so that only shows in the pod's log and in
 // the pgwatch_instance_up metric.
 //
 // A missing Secret or key is a state the user has to change: it is reported
-// in status and looked at again after CredentialsRetry. An error is returned
+// in status and looked at again after CredentialsRetry. The reconcile fails
 // only when the Secret could not be read at all, so that the work queue
 // retries with backoff and the failure counts as a reconcile error.
 func (r *PgpilotMonitorReconciler) resolveCredentials(
 	ctx context.Context,
-	monitor *pgpilotv1.PgpilotMonitor,
-) (credentials, ctrl.Result, error) {
+	status *monitorStatus,
+) (credentials, *outcome) {
+	monitor := status.monitor
 	db := monitor.Spec.Database
-	meta.RemoveStatusCondition(&monitor.Status.Conditions, legacyConditionDatabaseReachable)
+
+	// unavailable reports credentials the collector cannot start with. A
+	// collector started earlier may well still be running, but the monitor
+	// is not in the state its spec asks for.
+	unavailable := func(reason, message string) *outcome {
+		status.set(conditionCredentials, metav1.ConditionFalse, reason, message)
+		return &outcome{reason: reason, message: message, requeueAfter: r.credentialsRetry()}
+	}
 
 	switch {
 	case db.Username != "" && db.Password != "":
-		r.setCondition(monitor, conditionCredentials, metav1.ConditionTrue, "InlineCredentials",
+		status.set(conditionCredentials, metav1.ConditionTrue, "InlineCredentials",
 			"Inline username and password are set")
-		return credentials{usable: true}, ctrl.Result{}, nil
+		return credentials{}, nil
 
 	case db.CredentialsSecret != nil:
 		ref := db.CredentialsSecret
@@ -343,12 +387,13 @@ func (r *PgpilotMonitorReconciler) resolveCredentials(
 		err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: monitor.Namespace}, &secret)
 		switch {
 		case apierrors.IsNotFound(err):
-			return credentials{}, r.credentialsUnavailable(ctx, monitor, "SecretNotFound",
-				fmt.Sprintf("Secret %q not found in namespace %q", ref.Name, monitor.Namespace)), nil
+			return credentials{}, unavailable(reasonSecretNotFound,
+				fmt.Sprintf("Secret %q not found in namespace %q", ref.Name, monitor.Namespace))
 		case err != nil:
-			r.credentialsUnavailable(ctx, monitor, "SecretReadFailed",
-				fmt.Sprintf("Secret %q could not be read: %v", ref.Name, err))
-			return credentials{}, ctrl.Result{}, fmt.Errorf("read credentials secret %q: %w", ref.Name, err)
+			stop := unavailable(reasonSecretReadFailed, fmt.Sprintf("Secret %q could not be read: %v", ref.Name, err))
+			stop.requeueAfter = 0
+			stop.err = fmt.Errorf("read credentials secret %q: %w", ref.Name, err)
+			return credentials{}, stop
 		}
 
 		// A key that is absent leaves the pod in CreateContainerConfigError.
@@ -356,80 +401,21 @@ func (r *PgpilotMonitorReconciler) resolveCredentials(
 		// or peer authentication), so only its presence is required.
 		usernameKey, passwordKey := builder.CredentialKeys(ref)
 		if len(secret.Data[usernameKey]) == 0 {
-			return credentials{}, r.credentialsUnavailable(ctx, monitor, "SecretKeyMissing",
-				fmt.Sprintf("Secret %q has no value under key %q", ref.Name, usernameKey)), nil
+			return credentials{}, unavailable(reasonSecretKeyMissing,
+				fmt.Sprintf("Secret %q has no value under key %q", ref.Name, usernameKey))
 		}
 		if _, present := secret.Data[passwordKey]; !present {
-			return credentials{}, r.credentialsUnavailable(ctx, monitor, "SecretKeyMissing",
-				fmt.Sprintf("Secret %q has no key %q", ref.Name, passwordKey)), nil
+			return credentials{}, unavailable(reasonSecretKeyMissing,
+				fmt.Sprintf("Secret %q has no key %q", ref.Name, passwordKey))
 		}
 
-		r.setCondition(monitor, conditionCredentials, metav1.ConditionTrue, "CredentialsFound",
+		status.set(conditionCredentials, metav1.ConditionTrue, "CredentialsFound",
 			fmt.Sprintf("Secret %q provides keys %q and %q", ref.Name, usernameKey, passwordKey))
-		return credentials{usable: true, fromSecret: true, version: credentialsVersion(&secret)}, ctrl.Result{}, nil
+		return credentials{fromSecret: true, version: credentialsVersion(&secret)}, nil
 
 	default:
-		return credentials{}, r.credentialsUnavailable(ctx, monitor, "NoCredentials",
-			"spec.database has no inline username/password and no credentialsSecret"), nil
-	}
-}
-
-// credentialsUnavailable records why the monitor cannot run in its conditions
-// and as an event, and returns when to look again.
-func (r *PgpilotMonitorReconciler) credentialsUnavailable(
-	ctx context.Context,
-	monitor *pgpilotv1.PgpilotMonitor,
-	reason, message string,
-) ctrl.Result {
-	r.setCondition(monitor, "Ready", metav1.ConditionFalse, reason, message)
-	r.setCondition(monitor, conditionCredentials, metav1.ConditionFalse, reason, message)
-	// The READY column reads status.ready. A collector started earlier may
-	// well still be running, but the monitor is not in the state its spec
-	// asks for, and the two must not contradict each other.
-	monitor.Status.Ready = false
-	monitor.Status.ObservedGeneration = monitor.Generation
-	r.Recorder.Event(monitor, corev1.EventTypeWarning, reason, message)
-	if err := r.patchStatus(ctx, monitor); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to update status")
-	}
-	return ctrl.Result{RequeueAfter: r.credentialsRetry()}
-}
-
-// librariesUnavailable records that a referenced metric library could not be
-// read and asks for another try.
-func (r *PgpilotMonitorReconciler) librariesUnavailable(
-	ctx context.Context,
-	monitor *pgpilotv1.PgpilotMonitor,
-	cause error,
-) ctrl.Result {
-	log := logf.FromContext(ctx)
-	log.Error(cause, "failed to resolve metric libraries")
-	r.setCondition(monitor, "Ready", metav1.ConditionFalse, "LibraryResolveFailed", cause.Error())
-	r.Recorder.Eventf(monitor, corev1.EventTypeWarning, "LibraryResolveFailed",
-		"Failed to resolve metric libraries: %v", cause)
-	if statusErr := r.patchStatus(ctx, monitor); statusErr != nil {
-		log.Error(statusErr, "failed to update status")
-	}
-	return ctrl.Result{RequeueAfter: 30 * time.Second}
-}
-
-// configInvalid records that no collector configuration can be generated
-// from the monitor's spec as it stands.
-func (r *PgpilotMonitorReconciler) configInvalid(
-	ctx context.Context,
-	monitor *pgpilotv1.PgpilotMonitor,
-	reason, message string,
-) {
-	r.setCondition(monitor, "Ready", metav1.ConditionFalse, reason, message)
-	r.setCondition(monitor, conditionConfigGenerated, metav1.ConditionFalse, reason, message)
-	// A collector generated from an earlier, valid spec may still be
-	// running; the monitor is nevertheless not in the state its spec asks
-	// for, and status.ready must not say otherwise.
-	monitor.Status.Ready = false
-	monitor.Status.ObservedGeneration = monitor.Generation
-	r.Recorder.Event(monitor, corev1.EventTypeWarning, reason, message)
-	if err := r.patchStatus(ctx, monitor); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to update status")
+		return credentials{}, unavailable(reasonNoCredentials,
+			"spec.database has no inline username/password and no credentialsSecret")
 	}
 }
 
@@ -481,43 +467,14 @@ func (r *PgpilotMonitorReconciler) serverSideApply(ctx context.Context, obj clie
 	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership)
 }
 
-// patchStatus updates the PgpilotMonitor status subresource, re-fetching and
-// retrying on conflict so we don't spam ERROR logs for transient races with
-// other controllers touching the same object.
-func (r *PgpilotMonitorReconciler) patchStatus(ctx context.Context, monitor *pgpilotv1.PgpilotMonitor) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &pgpilotv1.PgpilotMonitor{}
-		if err := r.Get(ctx, types.NamespacedName{Name: monitor.Name, Namespace: monitor.Namespace}, latest); err != nil {
-			return err
-		}
-		latest.Status = monitor.Status
-		return r.Status().Update(ctx, latest)
-	})
-}
-
-func (r *PgpilotMonitorReconciler) setCondition(
-	monitor *pgpilotv1.PgpilotMonitor,
-	condType string,
-	status metav1.ConditionStatus,
-	reason, message string,
-) {
-	meta.SetStatusCondition(&monitor.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		ObservedGeneration: monitor.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-}
-
 // monitorChanged selects the updates of a PgpilotMonitor that are worth a
 // reconcile.
 //
-// Every reconcile writes status (lastReconciled at the least), and that write
-// comes back through the watch as an update of the monitor: without a filter
-// each reconcile caused another one. A change of the spec moves the
-// generation, as does the start of a deletion. Labels and annotations are let
-// through so that touching a monitor still reconciles it at once.
+// A status write, made whenever the status changes, comes back through the
+// watch as an update of the monitor: without a filter each such write caused
+// another reconcile. A change of the spec moves the generation, as does the
+// start of a deletion. Labels and annotations are let through so that
+// touching a monitor still reconciles it at once.
 func monitorChanged() predicate.Predicate {
 	return predicate.Or(
 		predicate.GenerationChangedPredicate{},
@@ -559,6 +516,9 @@ func (r *PgpilotMonitorReconciler) libraryToMonitors(
 
 	var monitors pgpilotv1.PgpilotMonitorList
 	if err := r.List(ctx, &monitors, client.InNamespace(lib.Namespace)); err != nil {
+		// Nothing can be enqueued, and nothing retries this: say so.
+		logf.FromContext(ctx).Error(err, "a changed metric library could not be mapped to its monitors; "+
+			"they pick the change up at their next reconcile", "library", lib.Name, "namespace", lib.Namespace)
 		return nil
 	}
 

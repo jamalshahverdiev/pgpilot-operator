@@ -358,19 +358,23 @@ type PgpilotMonitorSpec struct {
 
 // PgpilotMonitorStatus is the observed state of a PgpilotMonitor.
 type PgpilotMonitorStatus struct {
-	// ready is true when the underlying pgwatch Pod is Running and has
-	// passed its readiness probe. It is always written, so `false` shows
-	// up in `kubectl get` instead of an empty column.
+	// ready is true when the pgwatch Pod of the current spec is running
+	// and available, i.e. the rollout of the generated Deployment has
+	// completed. While a changed spec is rolled out, or cannot be, it is
+	// false even though the Pod of the previous spec keeps collecting. It
+	// always says what the Ready condition says, and is always written, so
+	// `false` shows up in `kubectl get` instead of an empty column.
 	// +optional
 	Ready bool `json:"ready"`
 
-	// podName is the name of the currently-running pgwatch Pod, if any.
+	// podName is the name of a pgwatch Pod that runs now: a ready one if
+	// there is one, otherwise the newest. Empty when none runs.
 	// +optional
 	PodName string `json:"podName,omitempty"`
 
-	// observedGeneration is the .metadata.generation the controller last
-	// reconciled. Comparing this with metadata.generation lets tools
-	// detect in-flight updates.
+	// observedGeneration is the .metadata.generation the status describes.
+	// It is written on every reconcile, also on one that could not apply
+	// the spec; the Ready condition tells which.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
@@ -380,14 +384,20 @@ type PgpilotMonitorStatus struct {
 	// +optional
 	ConfigHash string `json:"configHash,omitempty"`
 
-	// lastReconciled is the timestamp of the last successful reconcile.
+	// lastReconciled is when the operator last changed this status. It is
+	// not a heartbeat: a reconcile that finds everything as it was writes
+	// nothing.
 	// +optional
 	LastReconciled *metav1.Time `json:"lastReconciled,omitempty"`
 
 	// conditions reflects the current state of the PgpilotMonitor.
-	// Typical types:
-	//   - "Ready"             — Pod is up and scraping
-	//   - "ConfigGenerated"   — ConfigMap matches spec
+	//   - "Ready" — the pgwatch Pod of the current spec is running and
+	//     available. When False, the reason says what is in the way
+	//     (RolloutInProgress, ImagePullBackOff, CrashLoopBackOff,
+	//     PodCreateFailed, SecretNotFound, InvalidPreset, ...). It says
+	//     nothing about the database: see CredentialsAvailable.
+	//   - "ConfigGenerated" — the ConfigMap matches the spec. Unknown when
+	//     the reconcile did not get as far as rendering it.
 	//   - "CredentialsAvailable" — inline credentials are set, or the
 	//     referenced Secret exists and has a value under both keys. Whether
 	//     the database accepts them is not checked: pgwatch keeps retrying,

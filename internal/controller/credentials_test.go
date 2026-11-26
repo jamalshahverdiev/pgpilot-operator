@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 	"github.com/jamalshahverdiev/pgpilot-operator/internal/builder"
@@ -259,12 +260,13 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 		}, withinRechecks, interval).Should(Succeed())
 	})
 
-	It("keeps rechecking an unchanged Secret without touching the collector pod", func() {
-		createForSpec(newSecret(map[string]string{"username": "pgwatch", "password": "s3cret"}))
+	It("keeps rechecking an unchanged Secret without touching the collector pod or the status", func() {
+		secret := newSecret(map[string]string{"username": "pgwatch", "password": "s3cret"})
+		createForSpec(secret)
 		createForSpec(newMonitor(bySecret))
 		becomeReady()
 
-		var version string
+		var version, monitorVersion string
 		var generation int64
 		var reconciledAt metav1.Time
 		Eventually(func(g Gomega) {
@@ -272,17 +274,31 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 			g.Expect(version).NotTo(BeEmpty())
 			generation = deployment(g).Generation
 			reconciledAt = lastReconciled(g)
+			var m pgpilotv1.PgpilotMonitor
+			g.Expect(k8sClient.Get(context.TODO(), monitorKey, &m)).To(Succeed())
+			g.Expect(m.Status.Ready).To(BeTrue())
+			monitorVersion = m.ResourceVersion
 		}, timeout, interval).Should(Succeed())
 
+		// A recheck that finds nothing new must not write anything: not the
+		// pod template, and not the monitor's status either. With a write per
+		// recheck every monitor would be updated every few minutes for good.
 		Consistently(func(g Gomega) {
 			g.Expect(credentialsVersionOf(g)).To(Equal(version))
 			g.Expect(deployment(g).Generation).To(Equal(generation))
+			g.Expect(lastReconciled(g)).To(Equal(reconciledAt))
+			var m pgpilotv1.PgpilotMonitor
+			g.Expect(k8sClient.Get(context.TODO(), monitorKey, &m)).To(Succeed())
+			g.Expect(m.ResourceVersion).To(Equal(monitorVersion), "the monitor was written although nothing changed")
 		}, 3*testCredentialsRecheck, interval).Should(Succeed())
 
-		// ... and rechecks did happen in that time; otherwise the above
+		// ... and it was being rechecked all that time; otherwise the above
 		// would hold for a monitor nobody looks at any more.
+		Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(secret), secret)).To(Succeed())
+		secret.StringData = map[string]string{"password": "rotated"}
+		Expect(k8sClient.Update(context.TODO(), secret)).To(Succeed())
 		Eventually(func(g Gomega) {
-			g.Expect(lastReconciled(g).After(reconciledAt.Time)).To(BeTrue(), "no recheck was observed")
+			g.Expect(credentialsVersionOf(g)).NotTo(Equal(version), "no recheck was observed")
 		}, withinRechecks, interval).Should(Succeed())
 	})
 
@@ -403,8 +419,8 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 		}, timeout, interval).Should(Succeed())
 	})
 
-	// Nothing has to be read again for inline credentials, and the status
-	// write that ends a reconcile must not start another one.
+	// Nothing has to be read again for inline credentials, and nothing a
+	// reconcile does may start another one.
 	It("does not keep reconciling a healthy monitor with inline credentials", func() {
 		m := newMonitor(nil)
 		m.Spec.Database.Username, m.Spec.Database.Password = "pgwatch", "s3cret"
@@ -419,9 +435,17 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 				"wait for the reconciles of the creation to end")
 		}, timeout, interval).Should(Succeed())
 
+		// The status is only written when it changes, so an unchanged status
+		// alone would not show a loop: count the reconciles themselves. The
+		// counter covers every monitor of the suite; the one that is left
+		// over from its start is retried every fifteen seconds, which
+		// accounts for the allowance.
+		before := monitorReconciles()
 		Consistently(func(g Gomega) {
 			g.Expect(lastReconciled(g)).To(Equal(settled))
 		}, 2*testCredentialsRecheck, interval).Should(Succeed())
+		Expect(monitorReconciles()-before).To(BeNumerically("<=", 3),
+			"a healthy monitor with inline credentials has nothing to be reconciled for")
 	})
 
 	// The condition used to be called DatabaseReachable although nothing
@@ -440,6 +464,13 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 			})
 			g.Expect(k8sClient.Status().Update(context.TODO(), &m)).To(Succeed())
 		}, timeout, interval).Should(Succeed())
+		// A write of the status alone starts no reconcile; an operator that
+		// is upgraded looks at every monitor when it starts. Here a touch of
+		// the monitor stands in for that.
+		touched := &pgpilotv1.PgpilotMonitor{}
+		touched.Name, touched.Namespace = monitorKey.Name, monitorKey.Namespace
+		Expect(k8sClient.Patch(context.TODO(), touched, client.RawPatch(types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"test/touched":"after-upgrade"}}}`)))).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			var m pgpilotv1.PgpilotMonitor
@@ -830,10 +861,8 @@ func TestReconcile_InvalidPresetIsReportedAndNotRetried(t *testing.T) {
 		t.Run(preset, func(t *testing.T) {
 			monitor := unitMonitor()
 			monitor.Spec.Metrics.Preset = preset
-			secret := &corev1.Secret{Data: map[string][]byte{"username": []byte("u"), "password": []byte("p")}}
-			secret.Name, secret.Namespace = "db-creds", "team"
 			c := fake.NewClientBuilder().WithScheme(scheme.Scheme).
-				WithObjects(monitor, secret).WithStatusSubresource(monitor).Build()
+				WithObjects(monitor, unitSecret()).WithStatusSubresource(monitor).Build()
 			recorder := record.NewFakeRecorder(10)
 			r := &PgpilotMonitorReconciler{Client: c, Scheme: scheme.Scheme, Recorder: recorder}
 
@@ -884,4 +913,27 @@ func TestReconcile_InvalidPresetIsReportedAndNotRetried(t *testing.T) {
 			}
 		})
 	}
+}
+
+// monitorReconciles returns how often the PgpilotMonitor controller of this
+// process has reconciled, from controller-runtime's own counter.
+func monitorReconciles() float64 {
+	GinkgoHelper()
+	families, err := ctrlmetrics.Registry.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	var total float64
+	for _, family := range families {
+		if family.GetName() != "controller_runtime_reconcile_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "controller" && label.GetValue() == "pgpilotmonitor" {
+					total += metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	Expect(total).To(BeNumerically(">", 0), "the reconcile counter of the monitor controller was not found")
+	return total
 }

@@ -124,12 +124,19 @@ such as `app.kubernetes.io/part-of`, are yours to set.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `ready` | bool | True when the pgwatch pod is running and ready. Always present, so `false` is shown rather than an empty column |
-| `podName` | string | Name of the current pgwatch pod |
-| `observedGeneration` | int64 | Last reconciled `.metadata.generation` |
-| `lastReconciled` | timestamp | Time of last successful reconcile |
+| `ready` | bool | True when the pgwatch pod of the current spec is running and available, i.e. the rollout has completed. False while a changed spec is rolled out or cannot be, even though the pod of the previous spec keeps collecting. Always says what the `Ready` condition says, and is always present |
+| `podName` | string | Name of a pgwatch pod that runs now: a ready one if there is one, otherwise the newest. Empty when none runs |
+| `observedGeneration` | int64 | The `.metadata.generation` the status describes. Written on every reconcile, also when the spec could not be applied; the `Ready` condition tells which |
+| `lastReconciled` | timestamp | When the operator last changed the status. Not a heartbeat: a reconcile that finds nothing new writes nothing |
 | `configHash` | string | SHA-256 of the rendered `sources.yaml` + `metrics.yaml`. Changes whenever the underlying pgwatch Deployment is (or is about to be) rolled — useful for external tools tracking rollouts. |
-| `conditions` | []Condition | `Ready`, `ConfigGenerated`, `CredentialsAvailable` (credentials are configured and, for a Secret, both keys have a value; not a connectivity check) |
+| `conditions` | []Condition | `Ready` (its reason says what is in the way, see [troubleshooting](troubleshooting.md#monitor-stuck-in-readyfalse)), `ConfigGenerated` (`Unknown` when the reconcile did not get as far as rendering the configuration), `CredentialsAvailable` (credentials are configured and, for a Secret, both keys have a value; not a connectivity check) |
+
+A monitor's name has to fit the objects generated from it: at most 55
+characters, lower-case letters, digits and `-`, ending with a letter or digit.
+The Service is called `pgpilot-<name>`, and a Service name is a DNS label. A
+monitor with another name is accepted by the API (the rule cannot be enforced
+there without making existing objects undeletable) and reported with
+`Ready=False`, reason `InvalidName`; nothing is generated for it.
 
 ### Printer columns
 

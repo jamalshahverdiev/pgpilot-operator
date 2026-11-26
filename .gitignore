@@ -50,3 +50,8 @@ credentials.json
 *.credentials
 .aws/
 .ssh/
+
+# Local working notes; never part of the repository
+CONTEXT.MD
+CONTEXT.audit-findings.md
+session.txt
