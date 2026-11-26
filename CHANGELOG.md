@@ -2,6 +2,84 @@
 
 ## Unreleased
 
+### Monitors that can always be deleted, and names that are not taken over
+
+- The operator no longer puts a finalizer on PgpilotMonitors. The finalizer
+  protected nothing (everything generated for a monitor is owned by it and
+  garbage collected with it) and made every deletion wait for a running
+  operator: with the operator uninstalled, scaled to zero or without its
+  permissions, a monitor, its namespace and the CRD stayed in `Terminating`.
+  `helm uninstall` before the monitors were deleted was the usual way there.
+  When it starts, the operator takes `pgpilot.io/finalizer` off the monitors
+  that still carry it; a monitor that is being deleted is let go at once.
+- An object that already carries the name of a generated one (`pgpilot-<name>`,
+  `pgpilot-<name>-config`) and is not the monitor's is left alone.
+  The monitor reports `NameConflict` and names the object. Such an object
+  used to be overwritten, given the monitor as its owner and deleted together
+  with it; anyone allowed to create a PgpilotMonitor could rewrite a Service
+  or ConfigMap that way.
+- A monitor has a Service and a ServiceMonitor only while its Prometheus sink
+  is on. With the sink off nothing listens on the port they point at; they
+  are no longer created, and those of an earlier spec are removed, with a
+  `ScrapeTargetRemoved` event for each on the monitor.
+- When the cluster stops serving ServiceMonitors while the operator runs (the
+  prometheus-operator was uninstalled), monitors keep being reconciled. Each
+  says so in a new condition, `ServiceMonitorApplied`, and the ServiceMonitor
+  is applied again once the API is back. Every reconcile used to fail at that
+  point, before the status was written.
+- At start the operator logs whether it found the ServiceMonitor CRD, and
+  exits when the API server cannot say. A failed check used to count as "not
+  installed", silently, until the next restart.
+- Helm chart: with `leaderElection.enabled: false` the operator Deployment
+  uses the `Recreate` strategy, so that the pod of the old release is gone
+  before the one of the new release starts.
+
+Upgrade notes:
+
+- Monitors lose their `pgpilot.io/finalizer` at the first start of this
+  release. Nothing else about them changes: the spec is not written and no pod
+  is restarted. Tools that wait for the finalizer to appear on a new monitor
+  have nothing to wait for any more.
+- The exception, on Kubernetes 1.28 and 1.29 only: a monitor from an earlier
+  release that breaks one of the validation rules added in this release keeps
+  the finalizer until its spec is corrected, because those API servers refuse
+  every write to it (see the table under "Upgrade notes" further down). The
+  operator logs `could not take the finalizer off every monitor` with the
+  names.
+- An operator that runs without leader election outside the Helm chart
+  (`--leader-elect` not set) has to be restarted once more after the upgrade:
+  during a rolling update the pod of the old release puts the finalizer back
+  on the monitors the new one has just released. To see whether any monitor
+  carries one:
+
+  ```bash
+  kubectl get pgpilotmonitors -A \
+    -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'
+  ```
+- A monitor whose stored image tag `5.1.0` was written by an earlier release
+  and is kept for now, for any of the reasons listed in
+  docs/troubleshooting.md (`--migrate-stored-image-tag=false` and the
+  annotation `pgpilot.io/keep-image-tag` among them), gets the annotation
+  `pgpilot.io/operator-wrote-image-tag: "5.1.0"` in exchange for the
+  finalizer. It records what the finalizer proved, so that the tag can still
+  be removed later, when the reason is gone. The operator removes it when it
+  removes the tag; after a tag you changed or removed yourself it is left
+  behind, means nothing and can be deleted.
+- Rolling back to a release before 1.1 puts the finalizer back on every
+  monitor that release reconciles.
+- Monitors with `spec.sinks.prometheus.enabled: false` lose their Service and
+  ServiceMonitor. Nothing answered on that port.
+- A monitor whose generated name is taken by an object the operator had
+  adopted keeps it: the object carries the monitor as its controller. Only
+  objects that are not controlled by the monitor count as a conflict.
+- Generated objects that lost their owner references are no longer taken
+  back. Deleting a monitor with `--cascade=orphan` and creating it again used
+  to hand the running collector to the new monitor; now the new monitor
+  reports `NameConflict` until the leftovers are deleted, and the old
+  collector keeps running unchanged meanwhile. A monitor that is deleted and
+  created again while its objects are still being collected reports
+  `NameConflict` for a moment and then gets new ones, a new pod among them.
+
 ### Status that says what is running
 
 - `Ready` now means that the pgwatch pod **of the current spec** is running
@@ -243,9 +321,10 @@ Fixed alongside:
   port into a different address. Database names with `#`, `?`, `%` or spaces
   no longer cut the connection URL short. Connection strings for ordinary host
   and database names are unchanged, so no pod is rolled because of this.
-- The operator adds and removes its finalizer without rewriting the spec. It
-  used to send the whole object back, which made the API server store defaults
-  for `spec.image` on every monitor and counted as a spec change.
+- The finalizer of earlier releases is removed without rewriting the spec.
+  Adding it used to send the whole object back, which made the API server
+  store defaults for `spec.image` on every monitor and counted as a spec
+  change.
 - `status.ready` is always written, so `kubectl get pm` shows `false` instead
   of an empty READY column.
 - `kubectl get pml` shows the number of metrics (`status.metricCount`); the

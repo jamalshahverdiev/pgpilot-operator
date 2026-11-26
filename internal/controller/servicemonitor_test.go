@@ -25,7 +25,10 @@ import (
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -103,9 +106,9 @@ var _ = Describe("With the ServiceMonitor API present", Ordered, func() {
 		created.GenerateName = "test-servicemonitor-"
 		Expect(admin.Create(context.TODO(), created)).To(Succeed())
 		ns = created.Name
-	})
 
-	It("creates a ServiceMonitor for a monitor, owned by it", func() {
+		// The monitor all specs of this container are about. Created here,
+		// so that each of them can be run on its own.
 		secret := &corev1.Secret{StringData: map[string]string{"username": "pgwatch", "password": "s3cret"}}
 		secret.Name, secret.Namespace = "db-creds", ns
 		Expect(admin.Create(context.TODO(), secret)).To(Succeed())
@@ -119,7 +122,9 @@ var _ = Describe("With the ServiceMonitor API present", Ordered, func() {
 		monitor.Spec.Metrics = pgpilotv1.MetricsSpec{Preset: "basic"}
 		monitor.Spec.Sinks = pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true}}
 		Expect(admin.Create(context.TODO(), monitor)).To(Succeed())
+	})
 
+	It("creates a ServiceMonitor for a monitor, owned by it", func() {
 		Eventually(func(g Gomega) {
 			var sm monitoringv1.ServiceMonitor
 			g.Expect(admin.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-orders", Namespace: ns}, &sm)).To(Succeed())
@@ -136,7 +141,7 @@ var _ = Describe("With the ServiceMonitor API present", Ordered, func() {
 		// after every object, the ServiceMonitor included, was applied.
 		Eventually(func(g Gomega) {
 			var m pgpilotv1.PgpilotMonitor
-			g.Expect(admin.Get(context.TODO(), client.ObjectKeyFromObject(monitor), &m)).To(Succeed())
+			g.Expect(admin.Get(context.TODO(), types.NamespacedName{Name: "orders", Namespace: ns}, &m)).To(Succeed())
 			g.Expect(m.Status.ObservedGeneration).To(Equal(m.Generation))
 			g.Expect(m.Status.ConfigHash).NotTo(BeEmpty())
 		}, timeout, interval).Should(Succeed())
@@ -159,6 +164,52 @@ var _ = Describe("With the ServiceMonitor API present", Ordered, func() {
 		}, timeout, interval).Should(Succeed())
 	})
 
+	serviceMonitorCondition := func(g Gomega) *metav1.Condition {
+		var m pgpilotv1.PgpilotMonitor
+		g.Expect(admin.Get(context.TODO(), types.NamespacedName{Name: "orders", Namespace: ns}, &m)).To(Succeed())
+		g.Expect(m.Status.ObservedGeneration).To(Equal(m.Generation))
+		return meta.FindStatusCondition(m.Status.Conditions, "ServiceMonitorApplied")
+	}
+	patchMonitor := func(patch string) {
+		GinkgoHelper()
+		obj := &pgpilotv1.PgpilotMonitor{}
+		obj.Name, obj.Namespace = "orders", ns
+		Expect(admin.Patch(context.TODO(), obj, client.RawPatch(types.MergePatchType, []byte(patch)))).To(Succeed())
+	}
+
+	It("says in a condition that the ServiceMonitor is in place", func() {
+		Eventually(func(g Gomega) {
+			cond := serviceMonitorCondition(g)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(cond.Reason).To(Equal("Applied"))
+		}, timeout, interval).Should(Succeed())
+	})
+
+	// Service and ServiceMonitor point at the port of the Prometheus sink.
+	It("removes Service and ServiceMonitor when the Prometheus sink is turned off, and brings them back", func() {
+		key := types.NamespacedName{Name: "pgpilot-orders", Namespace: ns}
+		gone := func(obj client.Object) func() bool {
+			return func() bool { return apierrors.IsNotFound(admin.Get(context.TODO(), key, obj)) }
+		}
+
+		patchMonitor(`{"spec":{"sinks":{"prometheus":{"enabled":false},"grpc":{"enabled":true,"endpoint":"receiver.example.com:5000"}}}}`)
+		Eventually(gone(&monitoringv1.ServiceMonitor{}), timeout, interval).Should(BeTrue())
+		Eventually(gone(&corev1.Service{}), timeout, interval).Should(BeTrue())
+		Eventually(func(g Gomega) {
+			g.Expect(serviceMonitorCondition(g)).To(BeNil(), "a monitor that is to have no ServiceMonitor reports on none")
+		}, timeout, interval).Should(Succeed())
+
+		patchMonitor(`{"spec":{"sinks":{"prometheus":{"enabled":true}}}}`)
+		Eventually(gone(&monitoringv1.ServiceMonitor{}), timeout, interval).Should(BeFalse())
+		Eventually(gone(&corev1.Service{}), timeout, interval).Should(BeFalse())
+		Eventually(func(g Gomega) {
+			cond := serviceMonitorCondition(g)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		}, timeout, interval).Should(Succeed())
+	})
+
 	It("keeps only its own ServiceMonitors in the cache", func() {
 		foreign := &monitoringv1.ServiceMonitor{}
 		foreign.Name, foreign.Namespace = "someone-elses", ns
@@ -174,6 +225,54 @@ var _ = Describe("With the ServiceMonitor API present", Ordered, func() {
 				names = append(names, sm.Name)
 			}
 			g.Expect(names).To(ConsistOf("pgpilot-orders"))
+		}, timeout, interval).Should(Succeed())
+	})
+
+	// The operator decides when it starts whether the cluster has
+	// ServiceMonitors. Uninstalling the prometheus-operator later made every
+	// reconcile fail before it wrote a status, for something the collector
+	// does not need. Last spec of this container: it takes the API away.
+	It("goes on reconciling when the cluster stops serving ServiceMonitors", func() {
+		crd := &unstructured.Unstructured{}
+		crd.SetAPIVersion("apiextensions.k8s.io/v1")
+		crd.SetKind("CustomResourceDefinition")
+		crd.SetName("servicemonitors.monitoring.coreos.com")
+		Expect(admin.Delete(context.TODO(), crd)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(admin.Get(context.TODO(), client.ObjectKeyFromObject(crd), crd))
+		}, timeout, interval).Should(BeTrue())
+
+		// A change of the spec that has to reach the collector all the same.
+		patchMonitor(`{"spec":{"database":{"host":"pg-new.example.com"}}}`)
+
+		Eventually(func(g Gomega) {
+			cond := serviceMonitorCondition(g)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse), cond.Message)
+			g.Expect(cond.Reason).To(Equal("ServiceMonitorAPIMissing"))
+			g.Expect(cond.Message).To(ContainSubstring("no longer serves monitoring.coreos.com/v1"))
+		}, timeout, interval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			var cm corev1.ConfigMap
+			g.Expect(admin.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-orders-config", Namespace: ns}, &cm)).To(Succeed())
+			g.Expect(cm.Data[builder.SourcesKey]).To(ContainSubstring("pg-new.example.com"))
+		}, timeout, interval).Should(Succeed())
+
+		var m pgpilotv1.PgpilotMonitor
+		Expect(admin.Get(context.TODO(), types.NamespacedName{Name: "orders", Namespace: ns}, &m)).To(Succeed())
+		ready := meta.FindStatusCondition(m.Status.Conditions, "Ready")
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal("RolloutInProgress"), "the collector is rolled out as if nothing had happened: %s", ready.Message)
+
+		Eventually(func(g Gomega) {
+			var events corev1.EventList
+			g.Expect(admin.List(context.TODO(), &events, client.InNamespace(ns))).To(Succeed())
+			g.Expect(events.Items).To(ContainElement(SatisfyAll(
+				HaveField("InvolvedObject.Name", "orders"),
+				HaveField("Reason", "ServiceMonitorAPIMissing"),
+				HaveField("Type", corev1.EventTypeWarning),
+			)))
 		}, timeout, interval).Should(Succeed())
 	})
 })

@@ -57,6 +57,9 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 		// imageNS holds the monitors of the specs about the image an
 		// earlier release wrote into the spec.
 		imageNS string
+		// releaseNS holds a second set of the stale monitors, and one that
+		// breaks no rule, for the spec about the finalizer release.
+		releaseNS string
 		// What the API server tolerates for an object whose stored spec
 		// breaks a rule, as long as the offending value is not changed:
 		// from Kubernetes 1.30 updates of the object itself, from 1.33 also
@@ -165,6 +168,19 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 				"%s must be valid under the old CRDs, otherwise it proves nothing", name)
 		}
 
+		forRelease := &corev1.Namespace{}
+		forRelease.GenerateName = "test-upgrade-release-"
+		Expect(c.Create(context.TODO(), forRelease)).To(Succeed())
+		releaseNS = forRelease.Name
+		for name := range stale {
+			monitor := staleMonitor(name)
+			monitor.SetNamespace(releaseNS)
+			Expect(c.Create(context.TODO(), monitor)).To(Succeed())
+		}
+		valid := minimalMonitor(releaseNS, "valid")
+		valid.SetFinalizers([]string{finalizerName})
+		Expect(c.Create(context.TODO(), valid)).To(Succeed())
+
 		By("letting the v1.0.2 operator reconcile monitors that name no image, or pin one")
 		images := &corev1.Namespace{}
 		images.GenerateName = "test-upgrade-image-"
@@ -238,6 +254,40 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 				Expect(apierrors.IsInvalid(err)).To(BeTrue(),
 					"%s: this Kubernetes version is expected to refuse the status update, got: %v", name, err)
 			}
+		}
+	})
+
+	// When it starts, the operator takes the finalizer of earlier releases
+	// off every monitor, with a patch of metadata alone.
+	It("takes the old finalizer off them when the operator starts, where the API server lets it", func() {
+		finalizersOf := func(name string) []string {
+			GinkgoHelper()
+			var monitor pgpilotv1.PgpilotMonitor
+			Expect(c.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: releaseNS}, &monitor)).To(Succeed())
+			return monitor.Finalizers
+		}
+		release := &FinalizerRelease{Reader: client.NewNamespacedClient(c, releaseNS), Client: c}
+		released, err := release.Run(context.TODO())
+
+		Expect(finalizersOf("valid")).To(BeEmpty(), "a monitor that breaks no rule is released by every API server")
+		if !ratchetsUpdates {
+			// Kubernetes 1.28 and 1.29 validate the whole object whatever
+			// the write changes. These monitors keep the finalizer until
+			// their spec is corrected, which the upgrade notes say.
+			Expect(released).To(Equal(1))
+			Expect(err).To(HaveOccurred())
+			for name := range stale {
+				Expect(err.Error()).To(ContainSubstring(releaseNS+"/"+name+": remove the finalizer: "),
+					"the error has to name each monitor that is left")
+				Expect(finalizersOf(name)).To(Equal([]string{finalizerName}))
+			}
+			Expect(err.Error()).To(ContainSubstring("is invalid"), "and say why the API server refused")
+			return
+		}
+		Expect(err).NotTo(HaveOccurred(), "releasing the finalizer must not be refused")
+		Expect(released).To(Equal(len(stale) + 1))
+		for name := range stale {
+			Expect(finalizersOf(name)).To(BeEmpty(), name)
 		}
 	})
 

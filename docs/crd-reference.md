@@ -59,7 +59,7 @@ gives a Prometheus endpoint on port 9187. To use the gRPC sink alone, set
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `prometheus.enabled` | bool | no | `true` | Enable Prometheus /metrics endpoint |
+| `prometheus.enabled` | bool | no | `true` | Enable Prometheus /metrics endpoint. With `false` the monitor has no Service and no ServiceMonitor |
 | `prometheus.port` | int32 | no | `9187` | Port for /metrics (1-65535) |
 | `grpc.enabled` | bool | no | `false` | Enable gRPC sink |
 | `grpc.endpoint` | string | when enabled | | gRPC receiver host:port, no whitespace, max 512 chars |
@@ -129,7 +129,7 @@ such as `app.kubernetes.io/part-of`, are yours to set.
 | `observedGeneration` | int64 | The `.metadata.generation` the status describes. Written on every reconcile, also when the spec could not be applied; the `Ready` condition tells which |
 | `lastReconciled` | timestamp | When the operator last changed the status. Not a heartbeat: a reconcile that finds nothing new writes nothing |
 | `configHash` | string | SHA-256 of the rendered `sources.yaml` + `metrics.yaml`. Changes whenever the underlying pgwatch Deployment is (or is about to be) rolled — useful for external tools tracking rollouts. |
-| `conditions` | []Condition | `Ready` (its reason says what is in the way, see [troubleshooting](troubleshooting.md#monitor-stuck-in-readyfalse)), `ConfigGenerated` (`Unknown` when the reconcile did not get as far as rendering the configuration), `CredentialsAvailable` (credentials are configured and, for a Secret, both keys have a value; not a connectivity check) |
+| `conditions` | []Condition | `Ready` (its reason says what is in the way, see [troubleshooting](troubleshooting.md#monitor-stuck-in-readyfalse)), `ConfigGenerated` (`Unknown` when the reconcile did not get as far as rendering the configuration), `CredentialsAvailable` (credentials are configured and, for a Secret, both keys have a value; not a connectivity check), `ServiceMonitorApplied` (only on monitors that are to have a ServiceMonitor: the operator found the prometheus-operator API when it started and the Prometheus sink is on) |
 
 A monitor's name has to fit the objects generated from it: at most 55
 characters, lower-case letters, digits and `-`, ending with a letter or digit.

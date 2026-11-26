@@ -163,12 +163,8 @@ func buildArgs(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) []string
 
 	sinks := monitor.Spec.Sinks
 
-	if sinks.Prometheus != nil && sinks.Prometheus.Enabled {
-		port := sinks.Prometheus.Port
-		if port == 0 {
-			port = 9187
-		}
-		args = append(args, "--sink", fmt.Sprintf("prometheus://0.0.0.0:%d", port))
+	if PrometheusSinkEnabled(monitor) {
+		args = append(args, "--sink", fmt.Sprintf("prometheus://0.0.0.0:%d", prometheusPort(monitor)))
 	}
 
 	if sinks.GRPC != nil && sinks.GRPC.Enabled && sinks.GRPC.Endpoint != "" {
@@ -246,6 +242,12 @@ func containerImage(monitor *pgpilotv1.PgpilotMonitor) string {
 		tag = PgwatchVersion
 	}
 	return repo + ":" + tag
+}
+
+// PrometheusSinkEnabled reports whether the collector serves /metrics. Only
+// then is there something for a Service and a ServiceMonitor to point at.
+func PrometheusSinkEnabled(monitor *pgpilotv1.PgpilotMonitor) bool {
+	return monitor.Spec.Sinks.Prometheus != nil && monitor.Spec.Sinks.Prometheus.Enabled
 }
 
 func prometheusPort(monitor *pgpilotv1.PgpilotMonitor) int32 {

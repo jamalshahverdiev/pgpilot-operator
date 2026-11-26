@@ -838,6 +838,7 @@ func TestStatusIntervals(t *testing.T) {
 		"a collector on its way up":            {notReadyRequeue, 15 * time.Second},
 		"a collector that is held up":          {stuckRequeue, time.Minute},
 		"a missing library":                    {libraryRetry, 30 * time.Second},
+		"a name that is taken":                 {nameConflictRetry, 30 * time.Second},
 		"an object the API server refused":     {rejectedRetry, 5 * time.Minute},
 		"a read the cache had not caught up":   {staleReadRetry, time.Second},
 		"a missing Secret":                     {defaultCredentialsRetry, 30 * time.Second},

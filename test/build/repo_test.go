@@ -556,3 +556,27 @@ func TestMain_BuildsTheManagerThroughTheControllerPackage(t *testing.T) {
 		t.Error("the --migrate-stored-image-tag flag is gone or no longer on by default")
 	}
 }
+
+// Whether the cluster has ServiceMonitors is asked once, when the operator
+// starts. An answer that could not be had used to count as "no", silently,
+// until the next restart: the operator has to stop instead, and say in its
+// log which of the two answers it got.
+func TestMain_StopsWhenItCannotTellWhetherServiceMonitorsExist(t *testing.T) {
+	main := readRepoFile(t, "cmd/main.go")
+
+	exits := regexp.MustCompile(`(?s)serviceMonitorEnabled, err := builder\.HasServiceMonitorCRD\(dc\)\s+` +
+		`switch \{\s+case err != nil:.*?os\.Exit\(1\)\s+case serviceMonitorEnabled:`)
+	if !exits.MatchString(main) {
+		t.Error("cmd/main.go no longer exits when builder.HasServiceMonitorCRD returns an error")
+	}
+	// The troubleshooting page tells the reader to look for these.
+	docs := readRepoFile(t, "docs/troubleshooting.md")
+	for _, line := range []string{"ServiceMonitor CRD detected", "ServiceMonitor CRD not installed"} {
+		if !strings.Contains(main, `setupLog.Info("`+line) {
+			t.Errorf("cmd/main.go no longer logs %q", line)
+		}
+		if !strings.Contains(docs, line) {
+			t.Errorf("docs/troubleshooting.md no longer quotes the log line %q", line)
+		}
+	}
+}

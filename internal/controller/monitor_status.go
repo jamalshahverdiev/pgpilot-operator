@@ -65,6 +65,8 @@ const (
 	// The spec cannot be turned into a collector.
 	reasonInvalidName   = "InvalidName"
 	reasonInvalidPreset = "InvalidPreset"
+	// An object of a generated name exists and is not the monitor's.
+	reasonNameConflict = "NameConflict"
 	// The API server refused a generated object as invalid.
 	reasonApplyRejected = "ApplyRejected"
 	// A generated object could not be written for another reason; retried.
@@ -99,6 +101,10 @@ const (
 	// policy, the installed version of a CRD), and its removal reaches the
 	// operator through no watch.
 	rejectedRetry = 5 * time.Minute
+	// nameConflictRetry is how soon it is looked whether an object that is
+	// in the way of a generated one is gone. Such an object is not the
+	// operator's, so its removal reaches the operator through no watch.
+	nameConflictRetry = 30 * time.Second
 	// staleReadRetry is how soon a monitor is looked at again when the cache
 	// has not caught up with the operator's own last status write.
 	staleReadRetry = time.Second
@@ -160,6 +166,12 @@ func newMonitorStatus(monitor *pgpilotv1.PgpilotMonitor) *monitorStatus {
 	return &monitorStatus{monitor: monitor, evaluated: map[string]bool{}}
 }
 
+// drop removes a condition that does not apply to the monitor as it is now.
+func (s *monitorStatus) drop(condType string) {
+	s.evaluated[condType] = true
+	meta.RemoveStatusCondition(&s.monitor.Status.Conditions, condType)
+}
+
 func (s *monitorStatus) set(condType string, status metav1.ConditionStatus, reason, message string) {
 	s.evaluated[condType] = true
 	meta.SetStatusCondition(&s.monitor.Status.Conditions, metav1.Condition{
@@ -201,7 +213,7 @@ func (r *PgpilotMonitorReconciler) collectorPods(ctx context.Context, s *monitor
 //   - observedGeneration is the generation this reconcile looked at;
 //   - status.ready says what the Ready condition says;
 //   - a condition this reconcile did not get to is Unknown, not whatever an
-//     earlier reconcile left there;
+//     earlier reconcile left there, and one that no longer applies is gone;
 //   - podName names a pod that runs now, or nothing.
 //
 // The status is written only when it differs from what is stored, and an
@@ -235,6 +247,15 @@ func (r *PgpilotMonitorReconciler) finish(
 		if !s.evaluated[condType] {
 			s.set(condType, metav1.ConditionUnknown, out.reason, "Not evaluated: "+out.message)
 		}
+	}
+	// Not every monitor has this one. Where it is there, the same holds,
+	// with one exception: that the cluster does not serve ServiceMonitors is
+	// a fact about the cluster, which a reconcile that ended early has not
+	// looked at again. It stays, and is not announced a second time when the
+	// next complete reconcile finds it unchanged.
+	if c := meta.FindStatusCondition(monitor.Status.Conditions, conditionServiceMonitor); c != nil &&
+		!s.evaluated[conditionServiceMonitor] && c.Reason != reasonServiceMonitorAPIMissing {
+		s.set(conditionServiceMonitor, metav1.ConditionUnknown, out.reason, "Not evaluated: "+out.message)
 	}
 	readyStatus := metav1.ConditionFalse
 	if out.ready {

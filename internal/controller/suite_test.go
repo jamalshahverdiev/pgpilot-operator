@@ -178,6 +178,18 @@ var _ = BeforeSuite(func() {
 		defer GinkgoRecover()
 		Expect(mgr.Start(ctx)).To(Succeed())
 	}()
+
+	// When it starts, the manager makes one pass over the monitors of
+	// earlier releases. Specs store such monitors themselves and count what
+	// their own passes do with them, so the manager's has to be over before
+	// the first spec runs. The monitor stored above is all there is for it
+	// to find, and taking its finalizer off is the last thing it does.
+	Eventually(func(g Gomega) {
+		stored := &pgpilotv1.PgpilotMonitor{}
+		g.Expect(k8sClient.Get(context.TODO(), leftBehindBeforeStart, stored)).To(Succeed())
+		g.Expect(stored.Spec.Image.Tag).To(BeEmpty())
+		g.Expect(stored.Finalizers).To(BeEmpty())
+	}, time.Minute, 100*time.Millisecond).Should(Succeed())
 })
 
 var _ = AfterSuite(func() {

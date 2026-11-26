@@ -163,6 +163,13 @@ var _ = Describe("pgwatch image of a monitor", func() {
 			)))
 		}, timeout, interval).Should(Succeed())
 
+		// Its finalizer goes too, once the image is settled.
+		Eventually(func(g Gomega) []string {
+			obj := &pgpilotv1.PgpilotMonitor{}
+			g.Expect(k8sClient.Get(context.TODO(), leftBehindBeforeStart, obj)).To(Succeed())
+			return obj.Finalizers
+		}, timeout, interval).Should(BeEmpty())
+
 		// What the operator writes carries its own name from now on: the
 		// status it reports for this monitor is the first such write.
 		Eventually(func(g Gomega) []string {
@@ -223,6 +230,122 @@ var _ = Describe("pgwatch image of a monitor", func() {
 				Client:   client.WithFieldOwner(asOperator, fieldOwner),
 				Recorder: recorder,
 			}
+		})
+
+		// The image migration can be turned off, and it leaves some tags
+		// alone for reasons that can change later. The finalizer goes in
+		// either case, and with it the half of the ownership record that
+		// showed whose the tag is.
+		Describe("when the finalizer is taken off before the tag is", func() {
+			var release *FinalizerRelease
+
+			annotationsOf := func(key types.NamespacedName) map[string]string {
+				GinkgoHelper()
+				obj := &pgpilotv1.PgpilotMonitor{}
+				Expect(k8sClient.Get(context.TODO(), key, obj)).To(Succeed())
+				return obj.Annotations
+			}
+
+			BeforeEach(func() {
+				release = &FinalizerRelease{
+					Reader: client.NewNamespacedClient(asOperator, ns),
+					Client: client.WithFieldOwner(asOperator, fieldOwner),
+				}
+			})
+
+			It("notes whose the tag is, and the image migration goes by the note", func() {
+				key := leftBehind("released-first")
+				before := &pgpilotv1.PgpilotMonitor{}
+				Expect(k8sClient.Get(context.TODO(), key, before)).To(Succeed())
+
+				released, err := release.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(released).To(Equal(1))
+
+				after := &pgpilotv1.PgpilotMonitor{}
+				Expect(k8sClient.Get(context.TODO(), key, after)).To(Succeed())
+				Expect(after.Finalizers).To(BeEmpty())
+				Expect(after.Generation).To(Equal(before.Generation), "the spec must not have been written")
+				Expect(after.Annotations).To(HaveKeyWithValue(AnnotationOperatorWroteImageTag, "5.1.0"))
+				Expect(storedImage(k8sClient, key)).To(Equal(legacyImageBlock()), "the image is not this step's to change")
+
+				By("running it again changes nothing")
+				released, err = release.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(released).To(BeZero())
+
+				By("the image migration still knows the tag for the operator's")
+				result, err := migration.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(Equal(MigrationResult{Migrated: 1}))
+				Expect(storedImage(k8sClient, key)).To(Equal(map[string]any{"pullPolicy": "IfNotPresent"}))
+				Expect(annotationsOf(key)).NotTo(HaveKey(AnnotationOperatorWroteImageTag), "the note goes with the tag")
+				Eventually(collectorImage(k8sClient, key), timeout, interval).Should(Equal(currentImage))
+			})
+
+			// The release decides from the monitor as it was listed. One
+			// that had no annotations then may have been given some since,
+			// and a JSON patch that adds the map puts it in the place of
+			// the one that is there.
+			It("does not lose annotations the monitor was given after it was read", func() {
+				key := leftBehind("annotated-since")
+				listed := &pgpilotv1.PgpilotMonitor{}
+				Expect(asOperator.Get(context.TODO(), key, listed)).To(Succeed())
+				Expect(listed.Annotations).To(BeEmpty())
+
+				theirs := map[string]string{AnnotationKeepImageTag: "true", "team": "payments"}
+				bare := &pgpilotv1.PgpilotMonitor{}
+				bare.Name, bare.Namespace = key.Name, key.Namespace
+				Expect(k8sClient.Patch(context.TODO(), bare, client.RawPatch(types.MergePatchType,
+					[]byte(`{"metadata":{"annotations":{"pgpilot.io/keep-image-tag":"true","team":"payments"}}}`)))).To(Succeed())
+
+				released, err := release.release(context.TODO(), listed)
+				Expect(err).To(HaveOccurred(), "what was computed from the stale copy must be refused as a whole")
+				Expect(released).To(BeFalse())
+				Expect(annotationsOf(key)).To(Equal(theirs))
+				stored := &pgpilotv1.PgpilotMonitor{}
+				Expect(k8sClient.Get(context.TODO(), key, stored)).To(Succeed())
+				Expect(stored.Finalizers).To(Equal([]string{finalizerName}))
+
+				By("the next pass reads the monitor again")
+				count, err := release.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(count).To(Equal(1))
+				Expect(annotationsOf(key)).To(Equal(map[string]string{
+					AnnotationKeepImageTag: "true", "team": "payments", AnnotationOperatorWroteImageTag: "5.1.0",
+				}))
+			})
+
+			// What the note is for: this is the record without it.
+			It("could not tell without the note", func() {
+				key := leftBehind("no-note")
+				bare := &pgpilotv1.PgpilotMonitor{}
+				bare.Name, bare.Namespace = key.Name, key.Namespace
+				Expect(k8sClient.Patch(context.TODO(), bare, client.RawPatch(types.MergePatchType,
+					[]byte(`{"metadata":{"finalizers":null}}`)))).To(Succeed())
+
+				result, err := migration.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Migrated).To(BeZero())
+				Expect(result.Kept).To(ConsistOf(ContainSubstring("not the operator")))
+			})
+
+			It("notes nothing on a monitor whose tag the user chose", func() {
+				monitor := withSpec(minimalMonitor(ns, "chosen"), map[string]any{"tag": "5.1.0"}, "image")
+				monitor.SetFinalizers([]string{finalizerName})
+				createForSpec(monitor)
+				key := client.ObjectKeyFromObject(monitor)
+
+				released, err := release.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(released).To(Equal(1))
+				Expect(annotationsOf(key)).NotTo(HaveKey(AnnotationOperatorWroteImageTag))
+
+				result, err := migration.Run(context.TODO())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Migrated).To(BeZero())
+				Expect(result.Kept).To(HaveLen(1))
+			})
 		})
 
 		It("moves the monitor to the operator's release", func() {
@@ -391,8 +514,8 @@ var _ = Describe("pgwatch image of a monitor", func() {
 			// entry of the record and cannot be told apart.
 			Entry("written by another controller that is also called \"manager\", which the old operator never reconciled",
 				func(name string) types.NamespacedName {
-					// No finalizer in its request: the operator of this
-					// suite adds it, under its own name.
+					// No finalizer in its request, and the operator of this
+					// release adds none.
 					monitor := withSpec(minimalMonitor(ns, name), legacyImageBlock(), "image")
 					Expect(legacy.Create(context.TODO(), monitor)).To(Succeed())
 					DeferCleanup(func() { _ = k8sClient.Delete(context.TODO(), monitor) })
@@ -400,7 +523,7 @@ var _ = Describe("pgwatch image of a monitor", func() {
 					Eventually(func(g Gomega) {
 						var typed pgpilotv1.PgpilotMonitor
 						g.Expect(k8sClient.Get(context.TODO(), key, &typed)).To(Succeed())
-						g.Expect(typed.Finalizers).To(ContainElement(finalizerName))
+						g.Expect(typed.Status.ObservedGeneration).To(Equal(typed.Generation))
 					}, timeout, interval).Should(Succeed())
 					return key
 				},

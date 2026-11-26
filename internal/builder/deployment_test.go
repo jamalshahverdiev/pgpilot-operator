@@ -47,21 +47,48 @@ func TestBuildDeployment_ContainerImage(t *testing.T) {
 	}
 }
 
+// The Service, the container port and the probes follow the port of the
+// Prometheus sink, and without the sink there is no Service at all: pgwatch
+// has to be started accordingly.
 func TestBuildDeployment_Args_PrometheusSink(t *testing.T) {
-	monitor := newTestMonitor()
-	merged := MergedMetrics{Preset: "basic"}
-	dep := BuildDeployment(monitor, merged, PodTemplateVersions{Config: "h"})
-
-	args := dep.Spec.Template.Spec.Containers[0].Args
-	found := false
-	for i, a := range args {
-		if a == sinkFlag && i+1 < len(args) && strings.HasPrefix(args[i+1], "prometheus://") {
-			found = true
-			break
+	prometheusSinks := func(monitor *pgpilotv1.PgpilotMonitor) []string {
+		args := BuildDeployment(monitor, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"}).
+			Spec.Template.Spec.Containers[0].Args
+		var found []string
+		for i, a := range args {
+			if a == sinkFlag && i+1 < len(args) && strings.HasPrefix(args[i+1], "prometheus://") {
+				found = append(found, args[i+1])
+			}
 		}
+		return found
 	}
-	if !found {
-		t.Errorf("prometheus sink not found in args: %v", args)
+	grpc := &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver:9000"}
+
+	for name, tc := range map[string]struct {
+		sinks pgpilotv1.SinksSpec
+		want  []string
+	}{
+		"on, default port": {
+			pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true}},
+			[]string{"prometheus://0.0.0.0:9187"},
+		},
+		"on, its own port": {
+			pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 9200}},
+			[]string{"prometheus://0.0.0.0:9200"},
+		},
+		"turned off": {pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: false, Port: 9200}, GRPC: grpc}, nil},
+		"not set":    {pgpilotv1.SinksSpec{GRPC: grpc}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			monitor := newTestMonitor()
+			monitor.Spec.Sinks = tc.sinks
+			if got := prometheusSinks(monitor); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+			if got := PrometheusSinkEnabled(monitor); got != (len(tc.want) > 0) {
+				t.Errorf("PrometheusSinkEnabled: %v", got)
+			}
+		})
 	}
 }
 
