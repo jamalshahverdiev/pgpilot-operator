@@ -28,7 +28,7 @@ or **Secret-based** (`credentialsSecret`, recommended for production).
 | `username` | string | no* | | Inline DB username (dev/test only) |
 | `password` | string | no* | | Inline DB password (dev/test only) |
 | `credentialsSecret` | object | no* | | Reference to a Secret (see below) |
-| `customTags` | map[string]string | no | | Additional labels added to every measurement. Keys must not be empty, start with `__` or be `dbname` (pgwatch sets it to the monitor name). Prefer plain label names: on the Prometheus sink any character outside `[a-zA-Z0-9_]` is exported as `_`. Max 32 entries |
+| `customTags` | map[string]string | no | | Additional labels added to every measurement. Keys must not be empty, start with `__` or be `dbname` (pgwatch sets it to the monitor name). The operator adds `namespace`, the namespace of the monitor; a `namespace` key set here is replaced by it. Prefer plain label names: on the Prometheus sink any character outside `[a-zA-Z0-9_]` is exported as `_`. Max 32 entries |
 
 *Exactly one of (`username`+`password`) or `credentialsSecret` must be set.
 
@@ -71,6 +71,11 @@ The presets of pgwatch 6.2.0 that a monitor can use: `minimal`, `basic`,
 `standard`, `exhaustive`, `exhaustive_no_python`, `full`, `debug`,
 `recommendations`, and for managed services `rds`, `aurora`, `azure`, `gce` and
 `aiven`. [observability.md](observability.md#choosing-a-preset) describes them.
+
+The list is that of the pgwatch release the operator is built for, also for a
+monitor whose `spec.image` names another release. A monitor that only names a
+preset runs on the definitions inside its image; a preset that this list has
+and an older image lacks collects nothing there.
 
 A name that is not a preset is not rejected when the object is created (the
 list belongs to the pgwatch release, not to the API). The operator reports it
@@ -121,9 +126,10 @@ leaves them unset therefore moves to the newer pgwatch release when the
 operator is upgraded, and one that sets them stays where it is. (Monitors
 created under operator v1.0.2 or older had `tag: "5.1.0"` written into them;
 see [troubleshooting](troubleshooting.md#collector-still-runs-an-old-pgwatch-after-an-operator-upgrade).) Setting a tag
-is only needed to hold a monitor back: the metric definitions the operator
-hands to the collector are those of its default release (see
-[architecture.md](architecture.md#metricsyaml)).
+is only needed to hold a monitor back. A monitor that only names a preset then
+runs on the metric definitions of that release; one that combines a preset
+with metrics of its own is handed the definitions of the operator's default
+release whatever its tag (see [architecture.md](architecture.md#metricsyaml)).
 
 ### spec.podMetadata / spec.serviceMetadata
 
@@ -188,7 +194,7 @@ Between 1 and 256 entries; metric names must be unique within the library.
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | | Metric name. Pattern: `^[a-z_][a-z0-9_]*$`, max 63 chars |
 | `description` | string | no | | Human-readable hint |
-| `interval` | duration | no | `60s` | Collection period as a Go duration (e.g. `30s`, `5m`); at least `1s`, used in whole seconds |
+| `interval` | duration | no | `60s` | Collection period as a Go duration (e.g. `30s`, `5m`); at least `1s`, used in whole seconds. A metric that replaces one of the monitor's preset by name and names no interval keeps the preset's |
 | `sqls` | map[string]string | yes | | Minimum PostgreSQL major version -> SQL (see below). 1 to 32 entries; statements must not be empty |
 | `gauges` | []string | no | | Columns treated as gauges. `["*"]` = all columns |
 | `statementTimeoutSeconds` | int32 | no | `0` | **Deprecated, ignored.** pgwatch has no configurable per-metric timeout (see [query time](#query-time)); set `statement_timeout` on the monitoring role instead |

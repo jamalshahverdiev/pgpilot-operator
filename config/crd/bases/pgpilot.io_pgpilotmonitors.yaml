@@ -125,6 +125,9 @@ spec:
                       rejected: an empty key, a key starting with `__` (reserved by
                       Prometheus; pgwatch then fails to export every series of the
                       database) and `dbname`, which pgwatch sets to the monitor name.
+
+                      The operator adds the tag `namespace`, the namespace of the monitor,
+                      to every source. A `namespace` key set here is replaced by it.
                     maxProperties: 32
                     type: object
                     x-kubernetes-validations:
@@ -213,8 +216,9 @@ spec:
                     description: |-
                       tag of the pgwatch image. Leave empty to run the pgwatch release this
                       operator version is built for; that is the recommended setting, since
-                      the metric definitions the operator hands to the collector come from
-                      that release. A tag set here is kept across operator upgrades.
+                      the names of the presets are checked against that release, and the
+                      metric definitions the operator hands to a collector with metrics of
+                      its own come from it. A tag set here is kept across operator upgrades.
                     type: string
                 type: object
               metrics:
@@ -248,7 +252,9 @@ spec:
                           description: |-
                             interval is the collection period as a Go duration (e.g. "30s", "5m",
                             "1h"). pgwatch schedules in whole seconds, so fractions are truncated;
-                            the minimum is 1s. If omitted, the operator uses 60s.
+                            the minimum is 1s. If omitted, the operator uses 60s, or, for a
+                            metric that replaces one of the monitor's preset by name, the
+                            interval the preset collects it at.
                           type: string
                           x-kubernetes-validations:
                           - message: interval must be a duration of at least 1s, e.g.

@@ -23,6 +23,29 @@ spec:
 
 Works out of the box with vmagent, Prometheus with `kubernetes_sd_configs`, and any scraper that uses annotation-based target discovery.
 
+Every series of a monitored database carries two labels that say whose it is:
+`dbname`, the name of the monitor, and `namespace`, the namespace it is in.
+pgwatch sets both, so they are there however the pod is scraped. (Its own
+`pgwatch_exporter_*` series carry neither. A metric of yours with a
+`tag_namespace` column has that column's value in `namespace` instead.)
+
+If your scrape configuration puts a `namespace` label on the target itself,
+Prometheus keeps the scraped one as `exported_namespace`. Where it only
+repeats the target's namespace it can be removed; this rule does that and
+leaves a `tag_namespace` value alone:
+
+```yaml
+metric_relabel_configs:
+  - source_labels: [exported_namespace]
+    regex: my-team               # the namespace of the monitors
+    target_label: exported_namespace
+    replacement: ""
+```
+
+A rule covers one namespace (Prometheus cannot compare two labels); for
+monitors in several namespaces under one scrape job, write one per namespace.
+The generated ServiceMonitor carries the rule for its own.
+
 ## vmagent relabeling example
 
 If you use VictoriaMetrics vmagent with a `VMAgent` CR or scrape config:
@@ -55,6 +78,10 @@ No extra configuration needed. The ServiceMonitor:
 - Uses `interval: 30s`, `scrapeTimeout: 10s`
 - Keeps the timestamps pgwatch gives its samples, see
   [below](#sample-timestamps-and-metrics-on-long-intervals)
+- Removes `exported_namespace` where it repeats the target's `namespace`
+  label, which is where pgwatch's own namespace label ends up. A changed
+  ServiceMonitor takes a moment to reach Prometheus: after an upgrade the
+  first scrapes of a new pod can still carry the label
 
 To verify:
 
@@ -143,7 +170,7 @@ spec:
 A starter dashboard is provided at
 [`examples/grafana/pgpilot-overview.json`](../examples/grafana/pgpilot-overview.json).
 It has five row-groups driven by the labels the operator emits
-(`dbname`, `env`, `instance`, `table_name`, `query`, `locktype`):
+(`namespace`, `dbname`, `env`, `instance`, `table_name`, `query`, `locktype`):
 
 - **Overview** — DB size, idle-in-transaction, xmin age, deadlocks
 - **Backends & Locks** — connection state over time, locks by type

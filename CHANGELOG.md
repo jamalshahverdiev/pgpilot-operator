@@ -53,6 +53,84 @@ Upgrade notes:
   spec keeps running for that minute next to the new one; both send to the
   receiver meanwhile.
 
+### What the collector is given to work with
+
+- A monitor that only names a preset no longer gets a `metrics.yaml`, and
+  its collector no `--metrics` flag: it runs on the metric definitions inside
+  its image. The operator used to hand every such monitor its own copy of
+  the pgwatch 6.2.0 registry, which took the place of the one in the image.
+  A monitor that pins another pgwatch release in `spec.image.tag` therefore
+  ran that release with the definitions of 6.2.0; it now runs it with its
+  own. The ConfigMap of such a monitor shrinks from about 250 kB to a few
+  hundred bytes. A monitor with metrics of its own (inline or from a
+  library) still gets the file, with the built-in definitions next to its
+  own when it uses a preset as well: pgwatch reads either the file or its
+  own registry, not both.
+- A metric that replaces one of the preset by name keeps the preset's
+  interval unless its definition names one. It used to be collected every 60
+  seconds, so that correcting the statement of a metric the preset runs every
+  two hours made it run every minute.
+- The built-in definitions are handed on as pgwatch ships them, with every
+  key. Keys the operator had no field for (`statement_timeout_seconds`,
+  `is_private`) were dropped on the way; pgwatch 6.2.0 does not read them,
+  a later release may.
+- Every series carries the namespace of its monitor: the operator adds
+  `namespace` to the custom tags of the source, next to `dbname`, which is
+  the monitor's name alone. Two monitors of one name in two namespaces were
+  one database to a shared gRPC receiver and to a scraper that sets no
+  namespace label of its own. A target scraped through the generated
+  ServiceMonitor has a `namespace` label already, so Prometheus would keep
+  the scraped one as `exported_namespace`; the ServiceMonitor removes that
+  label where it only repeats the target's. A metric of your own with a
+  `tag_namespace` column carries that column's value in the label instead of
+  the monitor's namespace, as before.
+- The example dashboard (`examples/grafana/pgpilot-overview.json`) has a
+  Namespace variable and tells monitors of one name in two namespaces apart;
+  it used to draw them as one and add their lock counts together.
+- The operator parses the pgwatch registry once, not several times in every
+  reconcile of every monitor.
+
+Upgrade notes:
+
+- Every collector pod is replaced once when the operator is upgraded: the
+  generated configuration of every monitor changes.
+- **Make the new image pullable before upgrading** (mirror
+  `cybertecpostgresql/pgwatch:6.2.0` first where the cluster cannot reach
+  it). The `metrics.yaml` of a monitor that only names a preset is gone
+  from its ConfigMap as soon as the operator is upgraded, while the pod of
+  the previous release was started with `--metrics` pointing at it. That pod
+  goes on collecting from what it has loaded, but only until its container
+  is next started (a node drain, an out-of-memory kill): then it finds no
+  definitions, stays up, passes its probes and collects nothing. Normally
+  the new pod has replaced it by then; where the new pod cannot start, the
+  monitor reports why (`ImagePullBackOff`, ...), and that is the time to
+  act.
+- Scraped through the generated ServiceMonitor, the series end up as they
+  were. Until Prometheus has loaded the changed ServiceMonitor, the first
+  scrapes of a new pod are stored with an extra `exported_namespace` label;
+  those series go on answering queries for five minutes next to the final
+  ones, so a sum over a monitor can be too high for that long, once.
+- Scraped another way (pod or Service annotations, a scrape configuration of
+  your own), every series of a database gains the label `namespace`, which
+  makes it a new series to Prometheus: graphs continue, an alert that is
+  pending starts its `for:` period again. Where the scrape configuration
+  sets a `namespace` label on the target itself, Prometheus keeps the
+  scraped one as `exported_namespace`;
+  [observability.md](docs/observability.md#prometheus-annotation-based-discovery)
+  has the rule that removes it. A gRPC receiver finds `namespace` among the
+  custom tags of each measurement.
+- A `namespace` key in `spec.database.customTags` is replaced by the
+  namespace the monitor is in, and the operator records a `Warning` event
+  (`NamespaceTagReplaced`) on the monitor. Under the generated
+  ServiceMonitor such a monitor used to have `exported_namespace=<your
+  value>` on every series; that label no longer exists, and a selector on it
+  matches nothing. Move the value to another key before upgrading.
+- A metric of your own that carries the name of one in the preset and names
+  no `interval` is now collected at the preset's interval, not every 60
+  seconds. Set `interval: 60s` to keep that.
+- `spec.metrics.preset` is checked against the presets of pgwatch 6.2.0, as
+  before, also for a monitor whose image is another release.
+
 ### Metric definitions stored before the validation rules
 
 - The rules this release adds for metric definitions (`sqls` keys that are
@@ -296,7 +374,9 @@ Upgrade notes:
   definitions, or both. The new image has to be pullable:
   `cybertecpostgresql/pgwatch:6.2.0`. Where it is not (air-gapped clusters,
   mirrors), the new pod stays in `ImagePullBackOff` and the old one keeps
-  collecting until the image is available.
+  collecting until the image is available, or until its container is next
+  started: see "What the collector is given to work with" above, and mirror
+  the image before upgrading.
 - **Upgrade the CRDs together with the operator.** The old CRD defaults
   `spec.image.tag` to 5.1.0 and puts it back as fast as it is removed. The
   operator notices (`the installed PgpilotMonitor CRD still defaults
@@ -343,12 +423,15 @@ Upgrade notes:
   corrected (see the table under "Validation"); that includes removing the
   tag, by the operator or by hand.
 
-- **Monitors that stay on pgwatch 5.x** still receive the 6.2.0 metric
-  definitions when they use a preset; the operator has one copy. pgwatch 5.1.0
-  runs with them, but collects the 6.2.0 preset contents (see the next point)
-  and logs `no SQL found for metric version` once per interval for
-  `checkpointer` on PostgreSQL 14-16 and for the PostgreSQL 19 metrics. Staying
-  on 5.x is meant as a short-term measure.
+- **Monitors that stay on pgwatch 5.x.** One that only names a preset runs on
+  the definitions inside its own image and keeps its series
+  (`pgwatch_settings_<setting>` and so on). One with metrics of its own,
+  inline or from a library, is handed the operator's copy of the 6.2.0
+  registry next to them, since pgwatch reads either a file or its own
+  registry: pgwatch 5.1.0 runs with it, but collects the 6.2.0 preset
+  contents (see the next point) and logs `no SQL found for metric version`
+  once per interval for `checkpointer` on PostgreSQL 14-16 and for the
+  PostgreSQL 19 metrics. Staying on 5.x is meant as a short-term measure.
 - **Series that change name or meaning.** Check dashboards and alert rules:
 
   | Before | With pgwatch 6.2.0 |

@@ -163,3 +163,50 @@ func TestMergeMetrics_InvalidSQLVersion_Skipped(t *testing.T) {
 		t.Error("sqls[13] missing")
 	}
 }
+
+// Whether a definition names an interval is kept next to the interval: a
+// metric that replaces one of the preset keeps the preset's when it names
+// none (see expandPresetIntoIntervals).
+func TestMergeMetrics_RemembersWhichIntervalsAreNotSet(t *testing.T) {
+	sqls := map[string]string{"14": "SELECT 1"}
+	thirty := &metav1.Duration{Duration: 30 * time.Second}
+	library := pgpilotv1.PgpilotMetricLibrary{}
+	library.Spec.Metrics = []pgpilotv1.MetricDefinition{
+		{Name: "unset_in_both", SQLs: sqls},
+		{Name: "set_then_unset", SQLs: sqls, Interval: thirty},
+		{Name: "unset_then_set", SQLs: sqls},
+		{Name: "library_only", SQLs: sqls, Interval: thirty},
+	}
+	m := MergeMetrics(pgpilotv1.MetricsSpec{Custom: []pgpilotv1.MetricDefinition{
+		{Name: "unset_in_both", SQLs: sqls},
+		{Name: "set_then_unset", SQLs: sqls},
+		{Name: "unset_then_set", SQLs: sqls, Interval: thirty},
+		{Name: "named_default", SQLs: sqls, Interval: &metav1.Duration{Duration: defaultInterval * time.Second}},
+	}}, []pgpilotv1.PgpilotMetricLibrary{library})
+
+	// The later definition replaces the earlier one whole.
+	want := map[string]struct {
+		interval int
+		unset    bool
+	}{
+		"unset_in_both":  {defaultInterval, true},
+		"set_then_unset": {defaultInterval, true},
+		"unset_then_set": {30, false},
+		"library_only":   {30, false},
+		"named_default":  {defaultInterval, false},
+	}
+	if len(m.Intervals) != len(want) {
+		t.Errorf("intervals %v", m.Intervals)
+	}
+	for name, w := range want {
+		if m.Intervals[name] != w.interval || m.IntervalUnset[name] != w.unset {
+			t.Errorf("%s: interval %d (unset: %v), want %d (unset: %v)",
+				name, m.Intervals[name], m.IntervalUnset[name], w.interval, w.unset)
+		}
+	}
+	for name := range m.IntervalUnset {
+		if _, known := m.Intervals[name]; !known {
+			t.Errorf("%s is marked and has no interval", name)
+		}
+	}
+}
