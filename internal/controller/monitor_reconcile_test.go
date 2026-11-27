@@ -76,8 +76,10 @@ type reconcileHarness struct {
 	// cached, when set, is what a read of the monitor returns: a cache that
 	// has not caught up.
 	cached *pgpilotv1.PgpilotMonitor
-	// podListError makes listing the pods fail.
-	podListError error
+	// podListError makes listing the pods fail, configMapListError
+	// listing the ConfigMaps.
+	podListError       error
+	configMapListError error
 	// read lists the kinds of the objects the last reconcile read one by
 	// one; getError is asked before each such read.
 	read     []string
@@ -120,6 +122,9 @@ func newReconcileHarness(t *testing.T, monitor *pgpilotv1.PgpilotMonitor, objs .
 			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				if _, isPods := list.(*corev1.PodList); isPods && h.podListError != nil {
 					return h.podListError
+				}
+				if _, isConfigMaps := list.(*corev1.ConfigMapList); isConfigMaps && h.configMapListError != nil {
+					return h.configMapListError
 				}
 				return c.List(ctx, list, opts...)
 			},

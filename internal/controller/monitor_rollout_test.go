@@ -366,8 +366,10 @@ var _ = Describe("Status of a monitor", func() {
 	// deleted with it. Such objects do not carry the operator's label, so
 	// its cache does not even show them.
 	It("leaves alone what already carries a generated name", func() {
+		monitor := minimalMonitor(ns, "taken")
 		theirConfig := &corev1.ConfigMap{Data: map[string]string{"sources.yaml": "theirs"}}
-		theirConfig.Name, theirConfig.Namespace = "pgpilot-taken-config", ns
+		theirConfig.Name, theirConfig.Namespace = configMapNameFor(monitor), ns
+		Expect(theirConfig.Name).To(HavePrefix("pgpilot-taken-config-"))
 		createForSpec(theirConfig)
 		theirService := &corev1.Service{}
 		theirService.Name, theirService.Namespace = "pgpilot-taken", ns
@@ -375,12 +377,11 @@ var _ = Describe("Status of a monitor", func() {
 		theirService.Spec.Ports = []corev1.ServicePort{{Port: 8080}}
 		createForSpec(theirService)
 
-		monitor := minimalMonitor(ns, "taken")
 		createForSpec(monitor)
 		key := client.ObjectKeyFromObject(monitor)
 
 		expectReady(key, metav1.ConditionFalse, "NameConflict",
-			"ConfigMap pgpilot-taken-config already exists", "it has no owner")
+			"ConfigMap "+theirConfig.Name+" already exists", "it has no owner")
 		Eventually(func() []corev1.Event { return eventsOf(key, "NameConflict") }, timeout, interval).
 			Should(ConsistOf(HaveField("Type", corev1.EventTypeWarning)))
 		Consistently(func(g Gomega) {

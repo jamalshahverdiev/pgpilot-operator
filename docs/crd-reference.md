@@ -9,7 +9,7 @@
 One PgpilotMonitor creates one pgwatch pod that monitors a single PostgreSQL database.
 
 Keep `metadata.name` to at most 55 characters and without dots: the generated
-Deployment, Service and ConfigMap are named `pgpilot-<name>`, and a Service
+Deployment and Service are named `pgpilot-<name>`, and a Service
 name has to be a DNS label of at most 63 characters. A longer or dotted name
 is accepted by the API server, but the Service cannot be created for it.
 
@@ -205,7 +205,7 @@ such as `app.kubernetes.io/part-of`, are yours to set.
 | `podName` | string | Name of a pgwatch pod that runs now: a ready one if there is one, otherwise the newest. Empty when none runs |
 | `observedGeneration` | int64 | The `.metadata.generation` the status describes. Written on every reconcile, also when the spec could not be applied; the `Ready` condition tells which |
 | `lastReconciled` | timestamp | When the operator last changed the status. Not a heartbeat: a reconcile that finds nothing new writes nothing |
-| `configHash` | string | SHA-256 of the rendered `sources.yaml` + `metrics.yaml`. Changes whenever the underlying pgwatch Deployment is (or is about to be) rolled — useful for external tools tracking rollouts. |
+| `configHash` | string | SHA-256 of the rendered `sources.yaml` + `metrics.yaml`. Changes whenever the underlying pgwatch Deployment is (or is about to be) rolled — useful for external tools tracking rollouts. Its first ten characters end the name of the ConfigMap that holds this configuration, `pgpilot-<name>-config-<hash>` |
 | `conditions` | []Condition | `Ready` (its reason says what is in the way, see [troubleshooting](troubleshooting.md#monitor-stuck-in-readyfalse)), `ConfigGenerated` (`Unknown` when the reconcile did not get as far as rendering the configuration), `CredentialsAvailable` (credentials are configured and, for a Secret, both keys have a value; not a connectivity check), `ServiceMonitorApplied` (only on monitors that are to have a ServiceMonitor: the operator found the prometheus-operator API when it started and the Prometheus sink is on) |
 
 A monitor's name has to fit the objects generated from it: at most 55

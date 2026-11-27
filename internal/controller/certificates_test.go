@@ -609,9 +609,8 @@ var _ = Describe("The collector's certificates", func() {
 			g.Expect(pod.Volumes[2].Secret.SecretName).To(Equal("pg-ca"))
 			g.Expect(pod.Containers[0].VolumeMounts[2].ReadOnly).To(BeTrue())
 
-			var cm corev1.ConfigMap
-			cmKey := types.NamespacedName{Name: deployKey.Name + "-config", Namespace: ns}
-			g.Expect(k8sClient.Get(context.TODO(), cmKey, &cm)).To(Succeed())
+			cm, err := mountedConfigMap(k8sClient, monitorKey)
+			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(cm.Data[builder.SourcesKey]).To(ContainSubstring(
 				"sslrootcert=" + url.QueryEscape(pod.Containers[0].VolumeMounts[2].MountPath+"/ca.crt")))
 			g.Expect(cm.Data[builder.SourcesKey]).To(ContainSubstring("sslmode=verify-full"))

@@ -66,13 +66,64 @@ func BuildConfigMap(
 
 	cm := &corev1.ConfigMap{
 		APIVersion: "v1", Kind: "ConfigMap",
-		Name:      ResourceName(monitor.Name) + "-config",
+		Name:      ConfigMapName(monitor.Name, hash),
 		Namespace: monitor.Namespace,
 		Labels:    SystemLabels(monitor.Name),
+		// What a name stands for does not change: the name is the hash of
+		// the content. The API server holds the ConfigMap to that, so an
+		// edit by hand cannot reach the pod that reads it, and the kubelet
+		// need not watch it.
+		Immutable: new(true),
 		Data:      data,
 	}
 
 	return cm, hash, nil
+}
+
+// configNameHashLength is how much of the hash of a configuration its
+// ConfigMap carries in its name: forty bits, which is plenty to tell the few
+// configurations one monitor has at a time apart.
+const configNameHashLength = 10
+
+// ConfigMapName is the name of the ConfigMap that holds one rendered
+// configuration of a monitor: pgpilot-<monitor>-config-<hash>.
+//
+// Each configuration has a ConfigMap of its own, and each pod template names
+// the one it was made for. pgwatch reads its files again every two minutes,
+// so a ConfigMap that changed in place reached the pod of the previous
+// template as well: a pod that is kept because its successor cannot start,
+// and that was then handed a configuration written for the successor, with
+// a metrics file that was no longer there or certificates it never mounted.
+func ConfigMapName(monitorName, hash string) string {
+	return configMapPrefix(monitorName) + hash[:min(len(hash), configNameHashLength)]
+}
+
+// LegacyConfigMapName is what the one ConfigMap of a monitor was called
+// before each configuration had its own.
+func LegacyConfigMapName(monitorName string) string {
+	return ResourceName(monitorName) + "-config"
+}
+
+func configMapPrefix(monitorName string) string {
+	return LegacyConfigMapName(monitorName) + "-"
+}
+
+// IsConfigMapName reports whether a name is one a ConfigMap of the monitor
+// has or had: the one of a configuration, or the one of earlier releases.
+func IsConfigMapName(monitorName, name string) bool {
+	if name == LegacyConfigMapName(monitorName) {
+		return true
+	}
+	hash, found := strings.CutPrefix(name, configMapPrefix(monitorName))
+	if !found || len(hash) != configNameHashLength {
+		return false
+	}
+	for _, c := range hash {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
 }
 
 // pgwatch source entry — matches internal/sources.Source YAML tags.

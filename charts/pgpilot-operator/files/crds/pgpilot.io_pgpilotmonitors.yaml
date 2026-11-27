@@ -44,8 +44,9 @@ spec:
           metrics via the configured sinks. It is namespace-scoped and users may
           create any number of them in any namespace.
 
-          The name is used to derive the names of the generated Service, Deployment
-          and ConfigMap ("pgpilot-<name>") and as a label value. Keep it to at most
+          The name is used to derive the names of the generated Service and
+          Deployment ("pgpilot-<name>") and ConfigMap ("pgpilot-<name>-config-<hash>")
+          and as a label value. Keep it to at most
           55 characters without dots; with a longer or dotted name the Service cannot
           be created.
 

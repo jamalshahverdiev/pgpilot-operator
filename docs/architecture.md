@@ -27,11 +27,14 @@ PgpilotMonitor CR
   │  2. Resolve PgpilotMetricLibrary refs   │
   │  3. Merge metrics (preset + libs + custom) │
   │  4. Generate ConfigMap (sources.yaml,   │
-  │     metrics.yaml if needed, SHA-256)    │
+  │     metrics.yaml if needed), named      │
+  │     after the SHA-256 of its content    │
   │  5. Generate Deployment (1 replica)     │
   │  6. Generate Service (Prometheus sink)  │
   │  7. Generate ServiceMonitor (optional)  │
-  │  8. Update status + conditions          │
+  │  8. Once the rollout is complete:       │
+  │     remove earlier ConfigMaps           │
+  │  9. Update status + conditions          │
   └─────────────────────────────────────────┘
        │
        ▼
@@ -163,9 +166,49 @@ One Deployment with one replica runs pgwatch for a monitor.
 - **Resources.** `spec.resources` as it is, see
   [crd-reference.md](crd-reference.md#specresources).
 
-## Config hash rollout
+## A ConfigMap for each configuration
 
-The ConfigMap content is hashed (SHA-256). The hash is set as the `pgpilot.io/config-hash` annotation on the Deployment's pod template. When the config changes, the hash changes, triggering a rolling update.
+The rendered configuration is hashed (SHA-256), and the ConfigMap that holds
+it is named after the hash: `pgpilot-<monitor>-config-<first ten characters>`.
+The pod template mounts that ConfigMap by name and carries the whole hash as
+the annotation `pgpilot.io/config-hash`; the monitor has it as
+`status.configHash`. A changed configuration is therefore another ConfigMap
+and another pod template, and the Deployment replaces the pod.
+
+A ConfigMap is never changed in place. That is the point of the names:
+
+- pgwatch reads its files again every two minutes, and the pod of the
+  previous template runs until its successor is available: for good, when
+  the successor cannot start. With one ConfigMap for both, that pod was
+  handed a configuration written for its successor: a `conn_str` that names
+  certificate files only the new pod mounts, a `metrics.yaml` that is no
+  longer there while its own arguments still point at it. Now each pod
+  reads what it was started with for as long as it runs, and "what you asked
+  for is not rolled out yet" never means "what runs is half of each".
+- The ConfigMaps are immutable (`immutable: true`): the API server refuses
+  an edit of their content, so what a name stands for cannot change under
+  the pod that reads it, whoever tries.
+- The ConfigMaps of earlier configurations are removed when nothing mounts
+  them any more: at the first look that finds the monitor ready, that is,
+  the pod of the current template is available and no other is left. A
+  `ConfigMapRemoved` event says so. Until then they stay, however many
+  changes a rollout that is stuck goes through, and also while the monitor
+  is not ready for another reason; all of them are owned by the monitor and
+  go with it.
+- A change therefore needs room for a second ConfigMap until its rollout is
+  complete, as it needs room for a second pod. Where a ResourceQuota on
+  `configmaps` has none, the new one cannot be created, the monitor reports
+  `ApplyFailed` with the API server's `exceeded quota`, and the collector
+  that runs is left as it is.
+- The one ConfigMap of earlier releases, `pgpilot-<monitor>-config`, is what
+  the pod of such a release mounts. An upgraded operator leaves it as it is
+  and removes it the same way, after the rollout.
+- Only ConfigMaps that the monitor controls and that carry one of these
+  names are removed. To see them:
+  `kubectl get configmap -l pgpilot.io/monitor=<monitor>`. The current one
+  is the one whose name ends in the first ten characters of
+  `status.configHash`, which is also the one the Deployment's pod template
+  mounts.
 
 ## Credentials and what the operator reads
 
@@ -251,14 +294,11 @@ under a directory of its own:
 - The operator does not check dates or chains. A certificate that has
   expired, or an authority that did not sign the server's certificate, shows
   in the collector's log and as `pgwatch_instance_up 0`.
-- The paths are part of `conn_str`, and so of the ConfigMap, which the pod of
-  the previous template mounts as well and pgwatch reads again every two
-  minutes. While a rollout that adds certificates is stuck, that pod is
-  given paths it does not have and stops collecting: see [Adding
-  certificates to a running
-  monitor](troubleshooting.md#adding-certificates-to-a-running-monitor). The
-  same is true of every change to `conn_str`; a ConfigMap of its own for
-  each rendered configuration would end it and is not built yet.
+- The paths are part of `conn_str`, and so of the ConfigMap. A pod reads the
+  ConfigMap of its own configuration and no other (see [A ConfigMap for each
+  configuration](#a-configmap-for-each-configuration)), so the pod of a
+  template without certificates is never handed paths it does not have,
+  however long the rollout that adds them takes.
 
 ## Metric merge order
 
@@ -296,4 +336,4 @@ A PgpilotMonitor carries no finalizer. Everything generated for it lives in its 
 
 ## Names
 
-The generated objects are called `pgpilot-<monitor>` and `pgpilot-<monitor>-config`. Before the operator writes one it looks whether the name is taken: in its cache, and at the API server for what the cache does not hold. An object that is there and not controlled by the monitor is not written to and not deleted; the monitor reports `NameConflict` instead. Looking and writing are two requests, so this protects what exists, not an object created under the name in the instant between them.
+The generated objects are called `pgpilot-<monitor>` (Deployment, Service, ServiceMonitor), `pgpilot-<monitor>-config-<hash>` (ConfigMap) and `pgpilot-<monitor>-credentials` (the Secret of inline credentials). Before the operator writes one it looks whether the name is taken: in its cache, and at the API server for what the cache does not hold. An object that is there and not controlled by the monitor is not written to and not deleted; the monitor reports `NameConflict` instead. Looking and writing are two requests, so this protects what exists, not an object created under the name in the instant between them.

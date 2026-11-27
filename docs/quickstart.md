@@ -154,7 +154,8 @@ spec:
       - name: business-metrics
 ```
 
-The operator will re-reconcile and update the pgwatch ConfigMap automatically.
+The operator renders the new configuration into a ConfigMap of its own and
+replaces the collector pod with one that reads it.
 
 ## Cleanup
 

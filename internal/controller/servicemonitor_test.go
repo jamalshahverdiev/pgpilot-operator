@@ -254,8 +254,8 @@ var _ = Describe("With the ServiceMonitor API present", Ordered, func() {
 		}, timeout, interval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			var cm corev1.ConfigMap
-			g.Expect(admin.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-orders-config", Namespace: ns}, &cm)).To(Succeed())
+			cm, err := mountedConfigMap(admin, types.NamespacedName{Name: "orders", Namespace: ns})
+			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(cm.Data[builder.SourcesKey]).To(ContainSubstring("pg-new.example.com"))
 		}, timeout, interval).Should(Succeed())
 

@@ -22,8 +22,6 @@ import (
 	"strings"
 	"testing"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -149,13 +147,7 @@ func TestReconcile_InvalidMetric(t *testing.T) {
 		h.expectCondition("Ready", metav1.ConditionTrue, "PodRunning", "")
 		versions := func() string {
 			t.Helper()
-			var cm corev1.ConfigMap
-			var dep appsv1.Deployment
-			for obj, name := range map[client.Object]string{&cm: "pgpilot-db-config", &dep: "pgpilot-db"} {
-				if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "team", Name: name}, obj); err != nil {
-					t.Fatal(err)
-				}
-			}
+			cm, dep := h.storedConfigMap(), h.storedDeployment()
 			return cm.ResourceVersion + "/" + dep.ResourceVersion
 		}
 		before := versions()
@@ -225,12 +217,7 @@ func TestReconcile_TheSameNameInTwoListsIsAnOverride(t *testing.T) {
 		t.Errorf("applied %q", got)
 	}
 	h.expectCondition("ConfigGenerated", metav1.ConditionTrue, "ConfigMapUpdated", "")
-	var config corev1.ConfigMap
-	if err := h.client.Get(context.Background(),
-		types.NamespacedName{Namespace: "team", Name: "pgpilot-db-config"}, &config); err != nil {
-		t.Fatal(err)
-	}
-	rendered := config.Data["metrics.yaml"]
+	rendered := h.storedConfigMap().Data["metrics.yaml"]
 	if !strings.Contains(rendered, "from_inline") || !strings.Contains(rendered, "from_two_too") ||
 		strings.Contains(rendered, "from_one") || strings.Contains(rendered, "from_two\n") {
 		t.Errorf("rendered:\n%s", rendered)

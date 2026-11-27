@@ -585,9 +585,8 @@ var _ = Describe("A preset the collector cannot gather", func() {
 	// exist reports whether anything was generated for the monitor.
 	exist := func(key types.NamespacedName) bool {
 		name := types.NamespacedName{Name: builder.ResourceName(key.Name), Namespace: key.Namespace}
-		config := types.NamespacedName{Name: name.Name + "-config", Namespace: key.Namespace}
-		return k8sClient.Get(context.TODO(), name, &appsv1.Deployment{}) == nil ||
-			k8sClient.Get(context.TODO(), config, &corev1.ConfigMap{}) == nil
+		configs, err := configMapNames(k8sClient, key)
+		return k8sClient.Get(context.TODO(), name, &appsv1.Deployment{}) == nil || err != nil || len(configs) != 0
 	}
 
 	DescribeTable("is reported in the status instead of starting a collector with nothing to collect",

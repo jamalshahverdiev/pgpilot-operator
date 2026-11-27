@@ -50,7 +50,7 @@ func someoneElses(t *testing.T, kind string) client.Object {
 	switch kind {
 	case "ConfigMap":
 		obj = &corev1.ConfigMap{Data: map[string]string{"theirs": "data"}}
-		obj.SetName("pgpilot-db-config")
+		obj.SetName(unitConfigMapName(t, unitMonitor()))
 	case "Deployment":
 		labels := map[string]string{"app": "theirs"}
 		dep := &appsv1.Deployment{}
@@ -331,7 +331,8 @@ func TestReconcile_TheAPIServerIsAskedForWhatTheCacheDoesNotShow(t *testing.T) {
 		if len(h.applied) != 0 {
 			t.Errorf("applied %v without knowing whether the name is free", h.applied)
 		}
-		h.expectCondition("Ready", metav1.ConditionFalse, "ApplyFailed", "ConfigMap pgpilot-db-config could not be applied")
+		h.expectCondition("Ready", metav1.ConditionFalse, "ApplyFailed",
+			"ConfigMap "+unitConfigMapName(t, unitMonitor())+" could not be applied")
 	})
 
 	// The API server is asked about what the cache does not have, not about

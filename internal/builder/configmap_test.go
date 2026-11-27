@@ -295,13 +295,13 @@ func TestBuildConfigMap_Labels(t *testing.T) {
 	monitor := newTestMonitor()
 	merged := MergedMetrics{Preset: "basic"}
 
-	cm, _, _ := BuildConfigMap(monitor, merged)
+	cm, hash, _ := BuildConfigMap(monitor, merged)
 
 	if cm.Labels[LabelMonitorName] != testMonitorName {
 		t.Errorf("label %s: got %q, want %q", LabelMonitorName, cm.Labels[LabelMonitorName], testMonitorName)
 	}
-	if cm.Name != "pgpilot-test-db-config" {
-		t.Errorf("name: got %q, want %q", cm.Name, "pgpilot-test-db-config")
+	if want := "pgpilot-test-db-config-" + hash[:10]; cm.Name != want || len(hash) != 64 {
+		t.Errorf("name: got %q, want %q (hash %q)", cm.Name, want, hash)
 	}
 	if cm.Namespace != testMonitorNS {
 		t.Errorf("namespace: got %q, want %q", cm.Namespace, testMonitorNS)
@@ -330,3 +330,114 @@ func TestBuildConfigMap_SourcesCustomMetrics(t *testing.T) {
 
 // silence unused import
 var _ = time.Second
+
+// Each configuration has a ConfigMap of its own, named after its hash, and
+// the pod template of that configuration mounts it.
+func TestConfigMapName(t *testing.T) {
+	monitor := newTestMonitor()
+	first, firstHash, err := BuildConfigMap(monitor, MergedMetrics{Preset: "basic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, againHash, _ := BuildConfigMap(monitor, MergedMetrics{Preset: "basic"})
+	if first.Name != again.Name || firstHash != againHash {
+		t.Errorf("the same configuration is called %q and then %q", first.Name, again.Name)
+	}
+	if first.Name != ConfigMapName(monitor.Name, firstHash) || first.Name != "pgpilot-test-db-config-"+firstHash[:10] {
+		t.Errorf("name %q for hash %q", first.Name, firstHash)
+	}
+
+	changes := map[string]func(*pgpilotv1.PgpilotMonitor) MergedMetrics{
+		"another host": func(m *pgpilotv1.PgpilotMonitor) MergedMetrics {
+			m.Spec.Database.Host = "elsewhere.example.com"
+			return MergedMetrics{Preset: "basic"}
+		},
+		"another preset": func(*pgpilotv1.PgpilotMonitor) MergedMetrics { return MergedMetrics{Preset: "exhaustive"} },
+		"a metric of its own": func(*pgpilotv1.PgpilotMonitor) MergedMetrics {
+			return MergedMetrics{
+				Preset:      "basic",
+				Definitions: map[string]MetricDef{"mine": {SQLs: map[int]string{14: "SELECT 1"}}},
+				Intervals:   map[string]int{"mine": 60},
+			}
+		},
+	}
+	// The hash is of everything the ConfigMap holds. A query that changes
+	// while the name and the interval of its metric stay leaves
+	// sources.yaml as it was, and is another configuration all the same.
+	changes["the same metric with another query"] = func(*pgpilotv1.PgpilotMonitor) MergedMetrics {
+		return MergedMetrics{
+			Preset:      "basic",
+			Definitions: map[string]MetricDef{"mine": {SQLs: map[int]string{14: "SELECT 2"}}},
+			Intervals:   map[string]int{"mine": 60},
+		}
+	}
+	if first.Immutable == nil || !*first.Immutable {
+		t.Error("the ConfigMap can be edited: what its name stands for could change under the pod that reads it")
+	}
+	seen := map[string]string{first.Name: "the first"}
+	for what, change := range changes {
+		changed := newTestMonitor()
+		cm, hash, err := BuildConfigMap(changed, change(changed))
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if other, taken := seen[cm.Name]; taken {
+			t.Errorf("%s has the ConfigMap of %s, %q", what, other, cm.Name)
+		}
+		seen[cm.Name] = what
+		// The pod template of a configuration mounts its ConfigMap, and
+		// nothing else tells the two apart for the kubelet.
+		pod := BuildDeployment(changed, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: hash}).Spec.Template
+		if got := pod.Spec.Volumes[0].ConfigMap.Name; got != cm.Name {
+			t.Errorf("%s: the pod mounts %q, the configuration is in %q", what, got, cm.Name)
+		}
+		if pod.Annotations[AnnotationConfigHash] != hash {
+			t.Errorf("%s: annotation %q", what, pod.Annotations[AnnotationConfigHash])
+		}
+	}
+
+	// A hash shorter than the part of it that names the ConfigMap is used
+	// whole; none of the operator's are.
+	if got := ConfigMapName("db", "abc"); got != "pgpilot-db-config-abc" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestIsConfigMapName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"pgpilot-db-config":              true, // of earlier releases
+		"pgpilot-db-config-0123456789":   true,
+		"pgpilot-db-config-abcdef0123":   true,
+		"pgpilot-db-config-":             false,
+		"pgpilot-db-config-012345678":    false,
+		"pgpilot-db-config-0123456789a":  false,
+		"pgpilot-db-config-ABCDEF0123":   false,
+		"pgpilot-db-config-0123456789-x": false,
+		"pgpilot-db-config-not-a-hash":   false,
+		"pgpilot-db-config-ghijklmnop":   false,
+		"pgpilot-db-config-dashboards":   false,
+		"0123456789":                     false,
+		"config-0123456789":              false,
+		"pgpilot-db":                     false,
+		"pgpilot-db-credentials":         false,
+		"pgpilot-other-config":           false,
+		// The ConfigMap of the monitor "db-config", not of "db".
+		"pgpilot-db-config-config":            false,
+		"pgpilot-db-config-config-0123456789": false,
+		"":                                    false,
+	} {
+		if got := IsConfigMapName("db", name); got != want {
+			t.Errorf("IsConfigMapName(db, %q) = %v, want %v", name, got, want)
+		}
+	}
+	// And for that other monitor they are.
+	for _, name := range []string{"pgpilot-db-config-config", "pgpilot-db-config-config-0123456789"} {
+		if !IsConfigMapName("db-config", name) {
+			t.Errorf("IsConfigMapName(db-config, %q) = false", name)
+		}
+	}
+	// The legacy name of the one is not a name of the other's.
+	if IsConfigMapName("db-config", "pgpilot-db-config") {
+		t.Error("the ConfigMap of earlier releases of monitor db passes for one of monitor db-config")
+	}
+}
