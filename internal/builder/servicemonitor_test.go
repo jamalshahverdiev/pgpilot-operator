@@ -48,6 +48,13 @@ func TestBuildServiceMonitor_Endpoint(t *testing.T) {
 	if ep.ScrapeTimeout != "10s" {
 		t.Errorf("scrapeTimeout: got %q, want %q", string(ep.ScrapeTimeout), "10s")
 	}
+	// pgwatch stamps a sample with the time its query ran, and rate() over
+	// a counter is only exact with those timestamps. Turning them off was
+	// tried and taken back: it makes every rate() of every monitor uneven
+	// to close gaps in a few metrics on long intervals.
+	if ep.HonorTimestamps != nil {
+		t.Errorf("honorTimestamps: got %v, want it left at the default", *ep.HonorTimestamps)
+	}
 }
 
 func TestBuildServiceMonitor_NamespaceSelector(t *testing.T) {

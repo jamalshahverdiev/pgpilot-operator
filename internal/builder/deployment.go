@@ -21,13 +21,37 @@ const (
 	// Service and the ServiceMonitor refer to the port by this name.
 	metricsPortName = "metrics"
 
+	// tmpVolumeName is the emptyDir mounted at /tmp, the one writable place
+	// of the container.
+	tmpVolumeName = "tmp"
+
+	// AnnotationSafeToEvictLocalVolumes tells the cluster autoscaler which
+	// emptyDir volumes of a pod hold nothing worth keeping. Without it a pod
+	// with a disk-backed emptyDir keeps its node from being scaled down.
+	AnnotationSafeToEvictLocalVolumes = "cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes"
+
+	// minReadySecondsWithoutProbes is how long a collector without probes
+	// has to run before its pod counts as available.
+	//
+	// It stands in for a readiness probe, and so has to be longer than
+	// pgwatch takes to give up on a gRPC sink it cannot use. A receiver that
+	// refuses the connection, or a name that does not resolve, ends pgwatch
+	// within a second. One that does not answer at all (a NetworkPolicy or a
+	// firewall that drops the packets, a port where something else listens)
+	// is waited for: 20 seconds for the connection, and up to 30 before that
+	// for a name server that does not answer. A pod that counted as
+	// available earlier would be reported as running, and would take the
+	// place of the working pod of the previous spec, seconds before it
+	// exits.
+	minReadySecondsWithoutProbes = 60
+
 	// webDisableArg turns off pgwatch's built-in web UI and REST API, which
 	// otherwise listen on 0.0.0.0:8080 in every collector pod without
 	// authentication. Its /test-connect endpoint opens a connection to a
 	// caller-supplied address using the PGUSER/PGPASSWORD of the pod, so any
 	// workload able to reach the pod could read the monitored database's
 	// credentials. Nothing in the operator needs that server: probes and
-	// scraping use the Prometheus sink port.
+	// scraping use the Prometheus sink port, where there is one.
 	//
 	// The value must stay attached with "=": pgwatch declares the flag with an
 	// optional value, so a separate "all" argument would not be consumed.
@@ -65,11 +89,60 @@ func BuildDeployment(
 	if versions.Credentials != "" {
 		podAnnotations[AnnotationCredentialsVersion] = versions.Credentials
 	}
-	podAnnotations = MergeAnnotations(podAnnotations, monitor.Spec.PodMetadata.Annotations)
+	// What the operator sets by default gives way to the user's annotations,
+	// and those to the markers above.
+	podAnnotations = MergeAnnotations(podAnnotations, MergeAnnotations(
+		monitor.Spec.PodMetadata.Annotations,
+		map[string]string{AnnotationSafeToEvictLocalVolumes: tmpVolumeName},
+	))
 
-	args := buildArgs(monitor, merged)
-	envVars := buildEnvVars(monitor)
-	promPort := prometheusPort(monitor)
+	container := corev1.Container{
+		Name:  containerName,
+		Image: containerImage(monitor),
+		// Left empty when the monitor names none: the API server then
+		// decides by the tag, as it does for any pod.
+		ImagePullPolicy: monitor.Spec.Image.PullPolicy,
+		Args:            buildArgs(monitor, merged),
+		Env:             buildEnvVars(monitor),
+		Resources:       monitor.Spec.Resources,
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             new(true),
+			RunAsUser:                ptr.To[int64](65534),
+			ReadOnlyRootFilesystem:   new(true),
+			AllowPrivilegeEscalation: new(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      configVolumeName,
+				MountPath: configMountPath,
+				ReadOnly:  true,
+			},
+			{
+				Name:      tmpVolumeName,
+				MountPath: "/tmp",
+			},
+		},
+	}
+	var minReadySeconds int32
+	if PrometheusSinkEnabled(monitor) {
+		port := prometheusPort(monitor)
+		container.Ports = []corev1.ContainerPort{
+			{Name: metricsPortName, ContainerPort: port, Protocol: corev1.ProtocolTCP},
+		}
+		container.LivenessProbe = tcpProbe(port, 15, 20)
+		container.ReadinessProbe = tcpProbe(port, 5, 10)
+	} else {
+		// Without the Prometheus sink the collector listens nowhere: its
+		// web server is turned off, and the gRPC sink only connects out.
+		// A probe of the Prometheus port would never pass, and the pod
+		// would be restarted every minute without ever becoming ready.
+		// The kubelet restarts a collector that exits all the same; that it
+		// has stayed up for a while is what stands in for readiness.
+		minReadySeconds = minReadySecondsWithoutProbes
+	}
 
 	dep := &appsv1.Deployment{
 		APIVersion: "apps/v1", Kind: "Deployment",
@@ -77,7 +150,8 @@ func BuildDeployment(
 		Namespace: monitor.Namespace,
 		Labels:    sysLabels,
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To[int32](1),
+			Replicas:        ptr.To[int32](1),
+			MinReadySeconds: minReadySeconds,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					LabelAppInstance: monitor.Name,
@@ -90,44 +164,9 @@ func BuildDeployment(
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  containerName,
-							Image: containerImage(monitor),
-							Args:  args,
-							Env:   envVars,
-							Ports: []corev1.ContainerPort{
-								{
-									Name:          metricsPortName,
-									ContainerPort: promPort,
-									Protocol:      corev1.ProtocolTCP,
-								},
-							},
-							Resources:      monitor.Spec.Resources,
-							LivenessProbe:  tcpProbe(promPort, 15, 20),
-							ReadinessProbe: tcpProbe(promPort, 5, 10),
-							SecurityContext: &corev1.SecurityContext{
-								RunAsNonRoot:             new(true),
-								RunAsUser:                ptr.To[int64](65534),
-								ReadOnlyRootFilesystem:   new(true),
-								AllowPrivilegeEscalation: new(false),
-								Capabilities: &corev1.Capabilities{
-									Drop: []corev1.Capability{"ALL"},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      configVolumeName,
-									MountPath: configMountPath,
-									ReadOnly:  true,
-								},
-								{
-									Name:      "tmp",
-									MountPath: "/tmp",
-								},
-							},
-						},
-					},
+					Containers: []corev1.Container{container},
+					// The collector never talks to the Kubernetes API.
+					AutomountServiceAccountToken: new(false),
 					Volumes: []corev1.Volume{
 						{
 							Name: configVolumeName,
@@ -136,12 +175,15 @@ func BuildDeployment(
 							},
 						},
 						{
-							Name:     "tmp",
+							Name:     tmpVolumeName,
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
 						},
 					},
+					// With the container's settings above, this is what the
+					// "restricted" Pod Security Standard asks for.
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: new(true),
+						RunAsNonRoot:   new(true),
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 				},
 			},
@@ -161,15 +203,12 @@ func buildArgs(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) []string
 		args = append(args, "--metrics", configMountPath+"/"+MetricsKey)
 	}
 
-	sinks := monitor.Spec.Sinks
-
 	if PrometheusSinkEnabled(monitor) {
 		args = append(args, "--sink", fmt.Sprintf("prometheus://0.0.0.0:%d", prometheusPort(monitor)))
 	}
 
-	if sinks.GRPC != nil && sinks.GRPC.Enabled && sinks.GRPC.Endpoint != "" {
-		sink := "grpc://" + sinks.GRPC.Endpoint
-		args = append(args, "--sink", sink)
+	if GRPCSinkEnabled(monitor) {
+		args = append(args, "--sink", "grpc://"+monitor.Spec.Sinks.GRPC.Endpoint)
 	}
 
 	return args
@@ -248,6 +287,19 @@ func containerImage(monitor *pgpilotv1.PgpilotMonitor) string {
 // then is there something for a Service and a ServiceMonitor to point at.
 func PrometheusSinkEnabled(monitor *pgpilotv1.PgpilotMonitor) bool {
 	return monitor.Spec.Sinks.Prometheus != nil && monitor.Spec.Sinks.Prometheus.Enabled
+}
+
+// GRPCSinkEnabled reports whether the collector sends what it collects to a
+// gRPC receiver. A sink that is enabled and names no endpoint is none.
+func GRPCSinkEnabled(monitor *pgpilotv1.PgpilotMonitor) bool {
+	grpc := monitor.Spec.Sinks.GRPC
+	return grpc != nil && grpc.Enabled && grpc.Endpoint != ""
+}
+
+// HasSink reports whether the collector has anywhere to put what it
+// collects. Without a sink pgwatch exits as soon as it starts.
+func HasSink(monitor *pgpilotv1.PgpilotMonitor) bool {
+	return PrometheusSinkEnabled(monitor) || GRPCSinkEnabled(monitor)
 }
 
 func prometheusPort(monitor *pgpilotv1.PgpilotMonitor) int32 {

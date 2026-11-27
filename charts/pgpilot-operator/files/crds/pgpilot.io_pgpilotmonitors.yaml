@@ -196,7 +196,9 @@ spec:
                 properties:
                   pullPolicy:
                     default: IfNotPresent
-                    description: pullPolicy for the image.
+                    description: |-
+                      pullPolicy of the pgwatch container. The default also holds for the
+                      tag "latest", which Kubernetes would otherwise pull at every start.
                     enum:
                     - Always
                     - IfNotPresent
@@ -416,7 +418,9 @@ spec:
                       rule: '!self.exists(k, k.startsWith(''pgpilot.io/''))'
                 type: object
               resources:
-                description: resources overrides requests/limits on the pgwatch container.
+                description: |-
+                  resources are the requests and limits of the pgwatch container. The
+                  operator sets none of its own when this is left empty.
                 properties:
                   claims:
                     description: |-

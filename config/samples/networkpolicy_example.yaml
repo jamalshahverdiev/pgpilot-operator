@@ -1,10 +1,15 @@
 ## Example NetworkPolicy for pgpilot-operator.
 ##
 ## This allows:
-## 1. Operator manager pod → target PostgreSQL databases (egress on port 5432)
-## 2. pgwatch monitor pods → target PostgreSQL databases (egress on port 5432)
-## 3. Prometheus/vmagent → pgwatch monitor pods (ingress on port 9187)
-## 4. pgwatch monitor pods → Kubernetes API (egress on port 443)
+## 1. pgwatch monitor pods → target PostgreSQL databases (egress on port 5432)
+## 2. Prometheus/vmagent → pgwatch monitor pods (ingress on port 9187; only
+##    monitors with the Prometheus sink listen there)
+## 3. Operator manager pod → Kubernetes API (egress on port 443)
+##
+## The operator never connects to a database, and a monitor pod never talks
+## to the Kubernetes API. A monitor with the gRPC sink connects out to its
+## receiver: add an egress rule for it (see the comment below), or the
+## collector waits for the receiver, exits and is restarted for ever.
 ##
 ## Adapt the namespace selectors and pod selectors to your environment.
 
@@ -32,6 +37,10 @@ spec:
     - ports:
         - protocol: TCP
           port: 5432
+    # With spec.sinks.grpc: allow the collector out to the receiver
+    # - ports:
+    #     - protocol: TCP
+    #       port: <port of spec.sinks.grpc.endpoint>
     # Allow DNS resolution
     - ports:
         - protocol: UDP

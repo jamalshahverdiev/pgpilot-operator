@@ -582,7 +582,7 @@ func TestPodProblem(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			reason, message, found := podProblem(tc.pods)
+			reason, message, found := podProblem(tc.pods, false)
 			if found != (tc.wantReason != "") || reason != tc.wantReason {
 				t.Errorf("got found=%v reason=%q (%s), want reason %q", found, reason, message, tc.wantReason)
 			}
@@ -847,5 +847,87 @@ func TestStatusIntervals(t *testing.T) {
 		if tc.got != tc.want {
 			t.Errorf("%s is looked at again after %s, the documentation says %s", name, tc.got, tc.want)
 		}
+	}
+}
+
+// A pod without probes (a collector with the gRPC sink alone) is ready
+// whenever its container runs, also in the seconds between two crashes. It
+// is the Deployment's minReadySeconds that keeps it from counting, and the
+// reason must not change from one look to the next while it keeps crashing.
+func TestCollectorState_APodWithoutProbes(t *testing.T) {
+	running := func(restarts int32) func(*corev1.Pod) {
+		return pgwatchContainer(func(cs *corev1.ContainerStatus) {
+			cs.Ready, cs.RestartCount = true, restarts
+			cs.State.Running = &corev1.ContainerStateRunning{}
+			if restarts > 0 {
+				cs.LastTerminationState.Terminated = exited(1, "Error")
+			}
+		})
+	}
+	settling := appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1}
+	cases := map[string]struct {
+		minReadySeconds int32
+		status          appsv1.DeploymentStatus
+		pods            []corev1.Pod
+		wantReady       bool
+		wantReason      string
+		wantMessage     string
+	}{
+		"running again after many crashes": {
+			60, settling, []corev1.Pod{podAt("a", 1, podReady, running(7))},
+			false, "CrashLoopBackOff", "keeps exiting (exit code 1, Error); restarted 7 times",
+		},
+		"running again after one crash": {
+			60, settling, []corev1.Pod{podAt("a", 1, podReady, running(1))},
+			false, "PodNotReady", "exited (exit code 1, Error) and is being restarted",
+		},
+		"started for the first time": {
+			60, settling, []corev1.Pod{podAt("a", 1, podReady, running(0))},
+			false, "PodNotReady", "pgwatch pod is running; without a probe to ask, it counts as available once it has run for 60 seconds",
+		},
+		"up for long enough": {
+			60, appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+			[]corev1.Pod{podAt("a", 1, podReady, running(7))},
+			true, "PodRunning", "pgwatch pod is running",
+		},
+		// The pod of the current spec is the one that is asked, not the
+		// one before it, whatever that went through.
+		"next to the pod of the previous spec": {
+			60, appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, ReadyReplicas: 2, AvailableReplicas: 1},
+			[]corev1.Pod{podAt("old", 1, podReady, running(9)), podAt("new", 2, podReady, running(0))},
+			false, "RolloutInProgress", "the pod of the previous spec keeps running until then",
+		},
+		"next to the pod of the previous spec, and held up itself": {
+			60, appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+			[]corev1.Pod{podAt("old", 1, podReady, running(9)), podAt("new", 2, waiting("ImagePullBackOff", "not found"))},
+			false, "ImagePullBackOff", "cannot pull image",
+		},
+		// What troubles the pod of the previous spec is no longer the
+		// question once the current one has a pod, ready or not.
+		"next to a pod of the previous spec that keeps crashing": {
+			60, appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, ReadyReplicas: 1},
+			[]corev1.Pod{podAt("old", 1, waiting("CrashLoopBackOff", "back-off")), podAt("new", 2, podReady, running(0))},
+			false, "RolloutInProgress", "the pod of the previous spec keeps running until then",
+		},
+		"created and not started yet": {
+			60, appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1},
+			[]corev1.Pod{podAt("a", 1)},
+			false, "PodNotReady", "pgwatch pod is not ready yet",
+		},
+		// With a readiness probe a ready pod has passed it: nothing to ask.
+		"with probes a ready pod is not asked": {
+			0, settling, []corev1.Pod{podAt("a", 1, podReady, running(7))},
+			false, "PodNotReady", "pgwatch pod is not ready yet",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dep := deploymentWith(2, tc.status)
+			dep.Spec.MinReadySeconds = tc.minReadySeconds
+			ready, reason, message := collectorState(dep, tc.pods)
+			if ready != tc.wantReady || reason != tc.wantReason || !strings.Contains(message, tc.wantMessage) {
+				t.Errorf("got ready=%v %s %q\nwant ready=%v %s with %q", ready, reason, message, tc.wantReady, tc.wantReason, tc.wantMessage)
+			}
+		})
 	}
 }

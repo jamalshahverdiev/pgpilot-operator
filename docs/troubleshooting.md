@@ -29,6 +29,7 @@ error):
 | `InvalidMetric` | A metric definition, of a library or of the monitor itself, was stored before a validation rule existed and breaks it, see below |
 | `InvalidPreset` | See [Monitor reports InvalidPreset](#monitor-reports-invalidpreset) |
 | `InvalidName` | The monitor's name does not fit the generated objects, see below |
+| `NoSinkEnabled` | Neither sink is in use: `spec.sinks.prometheus.enabled` is `false`, and `spec.sinks.grpc` is not enabled or has no `endpoint`. pgwatch exits at once without a sink, so no collector is generated. The API server refuses such a monitor today; this is one stored before it did, and the Deployment, Service and ServiceMonitor that release made for it are left as they are, the pod restarting. Enable a sink |
 | `NameConflict` | An object with the name of a generated one exists and is not this monitor's, see below |
 | `ApplyRejected` | The API server, or an admission policy, refused a generated object as invalid, see below |
 | `ApplyFailed`, `ConfigBuildFailed` | The operator could not write or render something; it retries. If it persists, the message and the operator's log say why |
@@ -51,7 +52,8 @@ what it is waiting for:
 - a missing Secret, Secret key or metric library, and `NameConflict`: every
   30 seconds;
 - `ApplyRejected`: every five minutes;
-- `InvalidName` and `InvalidPreset`: not until the monitor is changed;
+- `InvalidName`, `InvalidPreset` and `NoSinkEnabled`: not until the monitor is
+  changed;
 - `InvalidMetric`: not until the monitor, or the library that is named, is
   changed;
 - `SecretReadFailed`, `ApplyFailed`, `ConfigBuildFailed`: retried with
@@ -149,7 +151,9 @@ status of an object that itself breaks a rule, and the operator logs
 
 The pgwatch pod of the current spec exists but has not passed its readiness
 probe. Usually it was created only a moment ago; the probe starts after a few
-seconds. If it stays, look at the pod:
+seconds. A collector without the Prometheus sink has no port to probe: its pod
+counts as available once it has run for a minute, and the message says so
+while it waits. If it stays, look at the pod:
 
 ```bash
 kubectl describe pod -n <namespace> -l pgpilot.io/monitor=<name>
@@ -474,9 +478,13 @@ Check logs:
 kubectl logs -n <namespace> -l pgpilot.io/monitor=<name> --previous
 ```
 
-pgwatch exits when its own configuration is unusable, for example when it has
-no sink, or a gRPC sink it cannot reach at startup. Connection and login
-failures do not make it exit (see
+pgwatch exits when its own configuration is unusable, for example when it
+cannot reach its gRPC sink at startup: at once when the connection is refused
+or the name does not resolve (`rpc error: code = Unavailable` in the log),
+after 20 to 50 seconds when nothing answers, as behind a NetworkPolicy that
+does not allow the collector out to the receiver. (For a monitor without any
+sink no collector is generated; it reports `NoSinkEnabled`.) Connection and
+login failures of the database do not make it exit (see
 [Monitor is Ready but there are no metrics](#monitor-is-ready-but-there-are-no-metrics)).
 
 A related problem that shows in the log but does not crash the pod:

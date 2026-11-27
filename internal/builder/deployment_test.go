@@ -1,11 +1,14 @@
 package builder
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
@@ -335,23 +338,200 @@ func TestBuildDeployment_SecurityContext(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_Probes(t *testing.T) {
-	monitor := newTestMonitor()
-	merged := MergedMetrics{}
-	dep := BuildDeployment(monitor, merged, PodTemplateVersions{Config: "h"})
+// The port and the probes are those of the Prometheus sink. A collector
+// without that sink listens nowhere: a probe of the port would never pass,
+// and the kubelet would restart the container every minute for good.
+func TestBuildDeployment_PortAndProbesFollowThePrometheusSink(t *testing.T) {
+	grpc := &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver.monitoring:9000"}
+	cases := map[string]struct {
+		sinks    pgpilotv1.SinksSpec
+		wantPort int32 // 0: neither a port nor probes
+	}{
+		"the sink on its default port": {pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true}}, 9187},
+		"the sink on another port":     {pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 9200}}, 9200},
+		"next to the gRPC sink": {pgpilotv1.SinksSpec{
+			Prometheus: &pgpilotv1.PrometheusSink{Enabled: true, Port: 9187}, GRPC: grpc,
+		}, 9187},
+		"the gRPC sink alone":     {pgpilotv1.SinksSpec{GRPC: grpc}, 0},
+		"the sink turned off":     {pgpilotv1.SinksSpec{Prometheus: &pgpilotv1.PrometheusSink{Enabled: false, Port: 9187}, GRPC: grpc}, 0},
+		"no sink at all (stored)": {pgpilotv1.SinksSpec{}, 0},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			monitor := newTestMonitor()
+			monitor.Spec.Sinks = tc.sinks
+			dep := BuildDeployment(monitor, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"})
+			c := dep.Spec.Template.Spec.Containers[0]
 
-	c := dep.Spec.Template.Spec.Containers[0]
-	if c.LivenessProbe == nil || c.LivenessProbe.TCPSocket == nil {
-		t.Fatal("liveness probe should be a TCP socket probe")
+			if tc.wantPort == 0 {
+				if len(c.Ports) != 0 || c.LivenessProbe != nil || c.ReadinessProbe != nil || c.StartupProbe != nil {
+					t.Errorf("ports %+v, liveness %+v, readiness %+v, startup %+v: nothing listens in this pod",
+						c.Ports, c.LivenessProbe, c.ReadinessProbe, c.StartupProbe)
+				}
+				// What stands in for readiness: having stayed up for longer
+				// than pgwatch waits for a sink that does not answer (up to
+				// 30 s for a name, then 20 s for the connection).
+				if dep.Spec.MinReadySeconds != 60 {
+					t.Errorf("minReadySeconds %d, want 60", dep.Spec.MinReadySeconds)
+				}
+				return
+			}
+
+			if len(c.Ports) != 1 || c.Ports[0].Name != "metrics" || c.Ports[0].ContainerPort != tc.wantPort ||
+				c.Ports[0].Protocol != corev1.ProtocolTCP {
+				t.Errorf("ports %+v", c.Ports)
+			}
+			for kind, probe := range map[string]*corev1.Probe{"liveness": c.LivenessProbe, "readiness": c.ReadinessProbe} {
+				if probe == nil || probe.TCPSocket == nil || probe.TCPSocket.Port.IntValue() != int(tc.wantPort) {
+					t.Errorf("the %s probe is %+v, want a TCP check of port %d", kind, probe, tc.wantPort)
+				}
+			}
+			if c.LivenessProbe.InitialDelaySeconds != 15 || c.LivenessProbe.PeriodSeconds != 20 ||
+				c.ReadinessProbe.InitialDelaySeconds != 5 || c.ReadinessProbe.PeriodSeconds != 10 {
+				t.Errorf("liveness %+v, readiness %+v", c.LivenessProbe, c.ReadinessProbe)
+			}
+			// Two plain TCP checks and nothing else: one slow accept must
+			// not restart the collector.
+			if c.StartupProbe != nil {
+				t.Errorf("startup probe %+v", c.StartupProbe)
+			}
+			for kind, probe := range map[string]*corev1.Probe{"liveness": c.LivenessProbe, "readiness": c.ReadinessProbe} {
+				if probe.TimeoutSeconds != 5 || probe.FailureThreshold != 3 || probe.SuccessThreshold != 1 ||
+					probe.HTTPGet != nil || probe.Exec != nil || probe.GRPC != nil {
+					t.Errorf("the %s probe: %+v", kind, probe)
+				}
+			}
+			// The readiness probe decides; nothing to wait for on top.
+			if dep.Spec.MinReadySeconds != 0 {
+				t.Errorf("minReadySeconds %d next to a readiness probe", dep.Spec.MinReadySeconds)
+			}
+		})
 	}
-	if c.LivenessProbe.TCPSocket.Port.IntValue() != 9187 {
-		t.Errorf("liveness port: got %d, want 9187", c.LivenessProbe.TCPSocket.Port.IntValue())
+}
+
+func TestBuildDeployment_ImagePullPolicy(t *testing.T) {
+	// "" is a monitor stored before the field had a default, or read
+	// without it: the API server then decides by the tag.
+	for _, policy := range []corev1.PullPolicy{corev1.PullAlways, corev1.PullNever, corev1.PullIfNotPresent, ""} {
+		monitor := newTestMonitor()
+		monitor.Spec.Image.PullPolicy = policy
+		dep := BuildDeployment(monitor, MergedMetrics{}, PodTemplateVersions{Config: "h"})
+		if got := dep.Spec.Template.Spec.Containers[0].ImagePullPolicy; got != policy {
+			t.Errorf("spec.image.pullPolicy %q: the container has %q", policy, got)
+		}
 	}
-	if c.ReadinessProbe == nil || c.ReadinessProbe.TCPSocket == nil {
-		t.Fatal("readiness probe should be a TCP socket probe")
+}
+
+// What the "restricted" Pod Security Standard asks of a pod, and what a
+// process that never talks to the Kubernetes API does not need.
+func TestBuildDeployment_PodHardening(t *testing.T) {
+	for name, sinks := range map[string]pgpilotv1.SinksSpec{
+		"with the Prometheus sink": {Prometheus: &pgpilotv1.PrometheusSink{Enabled: true}},
+		"without":                  {GRPC: &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver:9000"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			monitor := newTestMonitor()
+			monitor.Spec.Sinks = sinks
+			pod := BuildDeployment(monitor, MergedMetrics{}, PodTemplateVersions{Config: "h"}).Spec.Template.Spec
+
+			sc := pod.SecurityContext
+			if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+				t.Errorf("pod securityContext %+v: runAsNonRoot is not set", sc)
+			}
+			if sc == nil || sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
+				sc.SeccompProfile.LocalhostProfile != nil {
+				t.Errorf("pod securityContext %+v: want seccomp profile RuntimeDefault", sc)
+			}
+			if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+				t.Errorf("automountServiceAccountToken %v: the collector gets a token it never uses", pod.AutomountServiceAccountToken)
+			}
+			if pod.ServiceAccountName != "" || pod.HostNetwork || pod.HostPID || pod.HostIPC {
+				t.Errorf("serviceAccountName %q, hostNetwork %v, hostPID %v, hostIPC %v",
+					pod.ServiceAccountName, pod.HostNetwork, pod.HostPID, pod.HostIPC)
+			}
+		})
 	}
-	if c.ReadinessProbe.TCPSocket.Port.IntValue() != 9187 {
-		t.Errorf("readiness port: got %d, want 9187", c.ReadinessProbe.TCPSocket.Port.IntValue())
+}
+
+// Whatever the monitor says about resources is handed on as it is; the
+// operator adds nothing of its own. A request made up here would override
+// what a LimitRange of the namespace gives a container that names none, and
+// one below the range's minimum would keep the pod from being created.
+func TestBuildDeployment_ResourcesAreTheMonitors(t *testing.T) {
+	build := func(resources corev1.ResourceRequirements) corev1.ResourceRequirements {
+		monitor := newTestMonitor()
+		monitor.Spec.Resources = resources
+		return BuildDeployment(monitor, MergedMetrics{}, PodTemplateVersions{Config: "h"}).Spec.Template.Spec.Containers[0].Resources
+	}
+	if got := build(corev1.ResourceRequirements{}); len(got.Requests) != 0 || len(got.Limits) != 0 {
+		t.Errorf("a monitor without resources got %+v", got)
+	}
+	set := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+	}
+	if got := build(set); !got.Requests.Cpu().Equal(resource.MustParse("50m")) ||
+		!got.Limits.Memory().Equal(resource.MustParse("256Mi")) || len(got.Requests) != 1 || len(got.Limits) != 1 {
+		t.Errorf("got %+v, want %+v", got, set)
+	}
+}
+
+// The cluster autoscaler does not remove a node that runs a pod with a
+// disk-backed emptyDir unless the pod says the volume holds nothing to keep.
+func TestBuildDeployment_SafeToEvictAnnotation(t *testing.T) {
+	const key = "cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes"
+	build := func(user map[string]string) *appsv1.Deployment {
+		monitor := newTestMonitor()
+		monitor.Spec.PodMetadata.Annotations = user
+		return BuildDeployment(monitor, MergedMetrics{}, PodTemplateVersions{Config: "h", Credentials: "v1"})
+	}
+
+	t.Run("names the volume mounted at /tmp", func(t *testing.T) {
+		dep := build(nil)
+		got := dep.Spec.Template.Annotations[key]
+		var emptyDirs []string
+		for _, volume := range dep.Spec.Template.Spec.Volumes {
+			if volume.EmptyDir != nil {
+				emptyDirs = append(emptyDirs, volume.Name)
+			}
+		}
+		if got != "tmp" || strings.Join(emptyDirs, ",") != got {
+			t.Errorf("annotation %q, emptyDir volumes %q", got, emptyDirs)
+		}
+		mounts := dep.Spec.Template.Spec.Containers[0].VolumeMounts
+		if !slices.ContainsFunc(mounts, func(m corev1.VolumeMount) bool { return m.Name == got && m.MountPath == "/tmp" }) {
+			t.Errorf("volume %q is not mounted at /tmp: %+v", got, mounts)
+		}
+		// Not on the Deployment itself: the autoscaler reads pods.
+		if _, onDeployment := dep.Annotations[key]; onDeployment {
+			t.Errorf("the annotation is on the Deployment: %v", dep.Annotations)
+		}
+	})
+
+	t.Run("gives way to what the user set", func(t *testing.T) {
+		dep := build(map[string]string{key: "", "team": "data"})
+		ann := dep.Spec.Template.Annotations
+		if value, set := ann[key]; !set || value != "" || ann["team"] != "data" {
+			t.Errorf("annotations %v", ann)
+		}
+	})
+
+	t.Run("the operator's own markers still win over the user's", func(t *testing.T) {
+		ann := build(map[string]string{AnnotationConfigHash: "mine", AnnotationCredentialsVersion: "mine"}).Spec.Template.Annotations
+		if ann[AnnotationConfigHash] != "h" || ann[AnnotationCredentialsVersion] != "v1" || ann[key] != "tmp" {
+			t.Errorf("annotations %v", ann)
+		}
+	})
+}
+
+// Two collectors for a moment, not none: a change that cannot start (an
+// image that cannot be pulled, no room in a quota) leaves the collector that
+// runs in place. The API server's default does that; a strategy set here
+// would have to be kept in step with it.
+func TestBuildDeployment_KeepsTheDefaultRolloutStrategy(t *testing.T) {
+	dep := BuildDeployment(newTestMonitor(), MergedMetrics{}, PodTemplateVersions{Config: "h"})
+	if dep.Spec.Strategy.Type != "" || dep.Spec.Strategy.RollingUpdate != nil {
+		t.Errorf("strategy %+v", dep.Spec.Strategy)
 	}
 }
 
@@ -452,4 +632,67 @@ func TestBuildDeployment_CredentialsVersionAnnotation(t *testing.T) {
 			t.Error("no credentials version is expected without a Secret")
 		}
 	})
+}
+
+func sinkArgs(args []string) []string {
+	var out []string
+	for i, a := range args {
+		if a == "--sink" && i+1 < len(args) {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+// What pgwatch is told to do and what the pod promises the kubelet have to
+// be the same thing: a port and probes exactly when pgwatch is started with
+// the Prometheus sink on that port, and a gRPC sink exactly when it is
+// enabled and names an endpoint.
+func TestBuildDeployment_SinkArgsMatchThePod(t *testing.T) {
+	prom := func(enabled bool, port int32) *pgpilotv1.PrometheusSink {
+		return &pgpilotv1.PrometheusSink{Enabled: enabled, Port: port}
+	}
+	cases := map[string]struct {
+		sinks pgpilotv1.SinksSpec
+		want  []string
+	}{
+		"Prometheus alone": {pgpilotv1.SinksSpec{Prometheus: prom(true, 0)}, []string{"prometheus://0.0.0.0:9187"}},
+		"both": {
+			pgpilotv1.SinksSpec{Prometheus: prom(true, 9200), GRPC: &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver:9000"}},
+			[]string{"prometheus://0.0.0.0:9200", "grpc://receiver:9000"},
+		},
+		"gRPC alone": {
+			pgpilotv1.SinksSpec{Prometheus: prom(false, 9187), GRPC: &pgpilotv1.GRPCSink{Enabled: true, Endpoint: "receiver:9000"}},
+			[]string{"grpc://receiver:9000"},
+		},
+		"a gRPC sink that names an endpoint and is not enabled": {
+			pgpilotv1.SinksSpec{Prometheus: prom(true, 0), GRPC: &pgpilotv1.GRPCSink{Endpoint: "receiver:9000"}},
+			[]string{"prometheus://0.0.0.0:9187"},
+		},
+		"a gRPC sink that is enabled and names no endpoint (stored)": {
+			pgpilotv1.SinksSpec{Prometheus: prom(true, 0), GRPC: &pgpilotv1.GRPCSink{Enabled: true}},
+			[]string{"prometheus://0.0.0.0:9187"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			monitor := newTestMonitor()
+			monitor.Spec.Sinks = tc.sinks
+			c := BuildDeployment(monitor, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"}).
+				Spec.Template.Spec.Containers[0]
+
+			got := sinkArgs(c.Args)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("sinks %q, want %q", got, tc.want)
+			}
+			// The port the kubelet probes is the port pgwatch listens on.
+			listens := ""
+			if len(c.Ports) == 1 {
+				listens = fmt.Sprintf("prometheus://0.0.0.0:%d", c.Ports[0].ContainerPort)
+			}
+			if slices.Contains(got, listens) != (len(c.Ports) == 1) || (len(c.Ports) == 0) != (c.ReadinessProbe == nil) {
+				t.Errorf("ports %+v and readiness probe %+v do not go with the sinks %q", c.Ports, c.ReadinessProbe, got)
+			}
+		})
+	}
 }

@@ -53,6 +53,8 @@ No extra configuration needed. The ServiceMonitor:
 - Selects the pgwatch Service by labels
 - Scrapes the `metrics` port
 - Uses `interval: 30s`, `scrapeTimeout: 10s`
+- Keeps the timestamps pgwatch gives its samples, see
+  [below](#sample-timestamps-and-metrics-on-long-intervals)
 
 To verify:
 
@@ -82,6 +84,44 @@ spec:
       prometheus.io/scrape: "true"
       prometheus.io/port: "9187"
 ```
+
+## Sample timestamps and metrics on long intervals
+
+pgwatch does not run a metric's query when it is scraped. It runs it on the
+metric's own interval, keeps the result, and serves it at every scrape for ten
+minutes, each sample stamped with the time its query ran.
+
+Prometheus takes those timestamps over unless told otherwise, and so does the
+ServiceMonitor the operator generates. That is what makes `rate()` over a
+counter exact: a counter collected once a minute and scraped twice is still
+one sample per minute, at the moment it was read.
+
+The price is paid by metrics on long intervals. Prometheus stores a sample it
+has seen before only once, and stops returning a series five minutes after
+its last sample. A metric collected every ten minutes is there for five
+minutes and gone for five; an alert with `for: 10m` on it never fires. In the
+presets these are, among others, `table_io_stats` (10 minutes), `index_stats`
+(15 minutes), `sequence_health` (1 hour) and `table_bloat_approx_summary_sql`
+(2 hours). Ask for the last value over a window that covers the interval:
+
+```promql
+last_over_time(pgwatch_table_bloat_approx_summary_sql_approx_bloat_percentage[2h30m])
+```
+
+`max_over_time` does the same for a value that only matters at its worst, and
+is what the example dashboard uses. In an alert, put the `*_over_time` in the
+expression and keep `for:` short.
+
+The other way is `honor_timestamps: false` in a scrape configuration of your
+own (`honorTimestamps: false` in a ServiceMonitor of your own): a sample then
+gets the time of the scrape, and a metric is there for as long as pgwatch
+serves it, ten minutes after each collection. It is not what the operator
+sets, because of what it does to counters. Read every 30 seconds, a counter
+collected every 60 is a staircase, and `rate()` over a window swings by about
+the share one collection has in that window: around ±11 % for `[5m]` on a
+metric collected every minute, and between 0.7 and 1.0 of the true rate for
+`[15m]` on one collected every five. `irate()` is of no use at all then.
+Metrics collected less often than every ten minutes have gaps either way.
 
 ## Custom Prometheus port
 

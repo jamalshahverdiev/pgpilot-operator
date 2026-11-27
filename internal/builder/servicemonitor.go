@@ -34,6 +34,16 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 					Port:          metricsPortName,
 					Interval:      monitoringv1.Duration("30s"),
 					ScrapeTimeout: monitoringv1.Duration("10s"),
+					// honorTimestamps is left at its default, true, on
+					// purpose. pgwatch stamps every sample with the time
+					// its query ran; with those timestamps rate() over a
+					// counter is exact. Stamped with the time of the scrape
+					// instead, a counter collected once a minute and
+					// scraped twice becomes a staircase, and every rate()
+					// swings by the share one collection has in its window.
+					// What the default costs is that a metric collected
+					// less often than every five minutes has gaps; see
+					// docs/observability.md for how to query those.
 				},
 			},
 		},
