@@ -67,9 +67,9 @@ const (
 type PodTemplateVersions struct {
 	// Config is the hash of the rendered ConfigMap.
 	Config string
-	// Credentials identifies the state of the referenced credentials Secret.
-	// Empty for inline credentials, which are part of the pod template
-	// themselves.
+	// Credentials identifies the state of the Secret the pod takes its
+	// credentials from: the one the monitor references, or the one generated
+	// from its inline credentials.
 	Credentials string
 }
 
@@ -150,8 +150,14 @@ func BuildDeployment(
 		Namespace: monitor.Namespace,
 		Labels:    sysLabels,
 		Spec: appsv1.DeploymentSpec{
-			Replicas:        ptr.To[int32](1),
-			MinReadySeconds: minReadySeconds,
+			Replicas: ptr.To[int32](1),
+			// No ReplicaSets of earlier revisions are kept. Nothing rolls
+			// back to one: the pod template is the operator's to set, and a
+			// rollback would be undone at the next reconcile. What they do
+			// keep is whatever an earlier template held, which up to v1.0.2
+			// was the inline password of the monitor.
+			RevisionHistoryLimit: ptr.To[int32](0),
+			MinReadySeconds:      minReadySeconds,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					LabelAppInstance: monitor.Name,
@@ -215,40 +221,30 @@ func buildArgs(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) []string
 	return args
 }
 
+// buildEnvVars points PGUSER and PGPASSWORD at a Secret: the one the monitor
+// references, or the one the operator generates from inline credentials (see
+// BuildCredentialsSecret). The values themselves are never in the pod
+// template.
 func buildEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
-	db := monitor.Spec.Database
-
-	// Inline credentials take effect only when both username and password
-	// are set (CRD validation enforces the exactly-one rule).
-	if db.Username != "" && db.Password != "" {
-		return []corev1.EnvVar{
-			{Name: "PGUSER", Value: db.Username},
-			{Name: "PGPASSWORD", Value: db.Password},
-		}
+	var name, usernameKey, passwordKey string
+	switch secret := monitor.Spec.Database.CredentialsSecret; {
+	// Inline credentials first, as the controller reads them.
+	case HasInlineCredentials(monitor):
+		name, usernameKey, passwordKey = CredentialsSecretName(monitor.Name), generatedUsernameKey, generatedPasswordKey
+	case secret != nil:
+		name = secret.Name
+		usernameKey, passwordKey = CredentialKeys(secret)
+	default:
+		// No credentials at all: the controller reports that and builds
+		// nothing.
+		return nil
 	}
-
-	// Secret-based credentials.
-	secret := db.CredentialsSecret
-	usernameKey, passwordKey := CredentialKeys(secret)
+	fromSecret := func(key string) *corev1.EnvVarSource {
+		return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: name, Key: key}}
+	}
 	return []corev1.EnvVar{
-		{
-			Name: "PGUSER",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					Name: secret.Name,
-					Key:  usernameKey,
-				},
-			},
-		},
-		{
-			Name: "PGPASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					Name: secret.Name,
-					Key:  passwordKey,
-				},
-			},
-		},
+		{Name: "PGUSER", ValueFrom: fromSecret(usernameKey)},
+		{Name: "PGPASSWORD", ValueFrom: fromSecret(passwordKey)},
 	}
 }
 

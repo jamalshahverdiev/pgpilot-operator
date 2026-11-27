@@ -18,6 +18,7 @@ package chart
 
 import (
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -88,9 +89,12 @@ func TestChartRBAC_MatchesGeneratedRole(t *testing.T) {
 	}
 }
 
-// The operator reads the one Secret a monitor names. Listing or watching
-// Secrets would let it, and whoever compromises it, read every Secret in the
-// cluster; writing them is never needed.
+// The operator reads the one Secret a monitor names, and writes the one it
+// generates for a monitor with inline credentials: created and updated by
+// server-side apply (a patch), deleted when the monitor has none any more.
+// Listing or watching Secrets would let it, and whoever compromises it, read
+// every Secret in the cluster; neither is ever needed, nor is a plain update
+// or deleting them in bulk.
 func TestRBAC_SecretsAreReadOneAtATime(t *testing.T) {
 	roles := map[string]object{
 		"config/rbac/role.yaml": parseYAML(t,
@@ -105,8 +109,10 @@ func TestRBAC_SecretsAreReadOneAtATime(t *testing.T) {
 					onSecrets = append(onSecrets, p)
 				}
 			}
-			if len(onSecrets) != 1 || onSecrets[0] != "/secrets:get" {
-				t.Errorf("permissions on Secrets = %v, want exactly [/secrets:get]", onSecrets)
+			want := []string{"/secrets:create", "/secrets:delete", "/secrets:get", "/secrets:patch"}
+			slices.Sort(onSecrets)
+			if !slices.Equal(onSecrets, want) {
+				t.Errorf("permissions on Secrets = %v, want exactly %v", onSecrets, want)
 			}
 		})
 	}

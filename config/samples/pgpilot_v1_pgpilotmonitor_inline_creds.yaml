@@ -1,7 +1,9 @@
 ## Example: inline credentials for dev/test.
 ## For production use `pgpilot_v1_pgpilotmonitor.yaml` (Secret-based) instead —
 ## the fields `database.username` and `database.password` are stored in etcd
-## in clear text and visible via `kubectl get`.
+## in clear text and visible via `kubectl get pgpilotmonitor`. (The collector
+## pod does not show them: it reads them from a Secret the operator
+## generates, pgpilot-dev-inline-credentials.)
 
 apiVersion: pgpilot.io/v1
 kind: PgpilotMonitor

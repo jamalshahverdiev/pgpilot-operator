@@ -365,16 +365,17 @@ func envFlags(t *testing.T, container corev1.Container, creds secrets) []string 
 	t.Helper()
 	flags := make([]string, 0, 2*len(container.Env))
 	for _, env := range container.Env {
-		value := env.Value
-		if env.ValueFrom != nil {
-			ref := env.ValueFrom.SecretKeyRef
-			if ref == nil {
-				t.Fatalf("env %s: the test only knows values and Secret references", env.Name)
-			}
-			var ok bool
-			if value, ok = creds[ref.Name][ref.Key]; !ok {
-				t.Fatalf("env %s refers to key %q of Secret %q, which the test does not have", env.Name, ref.Key, ref.Name)
-			}
+		// The pod template is read by many who may not read Secrets: the
+		// builder puts no value into it, and one that appears there is a
+		// credential in the open (and would be rewritten by the kubelet,
+		// which this test cannot imitate).
+		if env.Value != "" || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("env %s is not a reference to a Secret: %+v", env.Name, env)
+		}
+		ref := env.ValueFrom.SecretKeyRef
+		value, ok := creds[ref.Name][ref.Key]
+		if !ok {
+			t.Fatalf("env %s refers to key %q of Secret %q, which the test does not have", env.Name, ref.Key, ref.Name)
 		}
 		flags = append(flags, "--env", env.Name+"="+value)
 	}

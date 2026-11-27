@@ -16,8 +16,11 @@ is accepted by the API server, but the Service cannot be created for it.
 ### spec.database
 
 Credentials can be provided in two ways — exactly one is required:
-**inline** (`username` + `password`, dev/test only, stored in etcd in clear text)
-or **Secret-based** (`credentialsSecret`, recommended for production).
+**inline** (`username` + `password`, dev/test only: they are part of the
+PgpilotMonitor, readable by everyone who may read it and stored in etcd as
+it is) or **Secret-based** (`credentialsSecret`, recommended for production).
+Inline credentials reach the collector through a Secret the operator generates
+for them, `pgpilot-<monitor>-credentials`; they are not in its pod template.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|

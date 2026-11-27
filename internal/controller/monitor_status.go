@@ -87,6 +87,9 @@ const (
 	reasonSecretKeyMissing = "SecretKeyMissing"
 	reasonSecretReadFailed = "SecretReadFailed"
 	reasonNoCredentials    = "NoCredentials"
+	// The monitor names, as its own, the Secret the operator generates from
+	// inline credentials and removes when there are none.
+	reasonGeneratedSecretReferenced = "GeneratedSecretReferenced"
 )
 
 const (

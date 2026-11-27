@@ -488,3 +488,24 @@ func TestAPinnedReleaseRunsOnItsOwnRegistry(t *testing.T) {
 		})
 	})
 }
+
+// Inline credentials reach the collector through the Secret the operator
+// generates for them: the pod names that Secret and its keys, and what it
+// reads there logs in.
+func TestInlineCredentials(t *testing.T) {
+	t.Parallel()
+	monitor := newMonitor("inline", pgpilotv1.MetricsSpec{Preset: "basic"})
+	monitor.Spec.Database.CredentialsSecret = nil
+	monitor.Spec.Database.Username, monitor.Spec.Database.Password = monitoringUser, monitoringPassword
+
+	generated := builder.BuildCredentialsSecret(monitor)
+	held := map[string]string{}
+	for key, value := range generated.Data {
+		held[key] = string(value)
+	}
+	// Only the generated Secret: a pod that still named the monitor's own
+	// would find nothing here.
+	c := startCollector(t, monitor, nil, secrets{generated.Name: held})
+	c.eventually("first samples with inline credentials", up(monitor.Name))
+	c.expectCleanLog()
+}

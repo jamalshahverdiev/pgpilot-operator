@@ -22,7 +22,8 @@ PgpilotMonitor CR
   │         PgpilotMonitor Controller       │
   │                                         │
   │  1. Validate credentials source         │
-  │     (inline or Secret — exactly one)    │
+  │     (inline or Secret — exactly one);   │
+  │     inline: generate a Secret for them  │
   │  2. Resolve PgpilotMetricLibrary refs   │
   │  3. Merge metrics (preset + libs + custom) │
   │  4. Generate ConfigMap (sources.yaml,   │
@@ -71,9 +72,12 @@ The name of the source is the monitor's name; pgwatch exports it as the
 namespaces apart, and is the operator's: a `namespace` key in
 `spec.database.customTags` does not replace it.
 
-`PGUSER` / `PGPASSWORD` come from either:
-- inline `spec.database.username` / `password` (plain env values), or
-- `spec.database.credentialsSecret` (via `valueFrom.secretKeyRef`).
+`PGUSER` / `PGPASSWORD` always come from a Secret (`valueFrom.secretKeyRef`),
+never from a value in the pod template:
+- `spec.database.credentialsSecret`, the monitor's own, or
+- `pgpilot-<monitor>-credentials`, which the operator generates from inline
+  `spec.database.username` / `password` and removes again when the monitor
+  no longer has them.
 
 ### metrics.yaml
 
@@ -167,9 +171,23 @@ The ConfigMap content is hashed (SHA-256). The hash is set as the `pgpilot.io/co
 A monitor's credentials are either inline or in a Secret of the same namespace.
 For a Secret the operator only checks that it exists and has both keys, and
 points the pod's `PGUSER` / `PGPASSWORD` at it; the values never pass through
-the operator.
+the operator. Inline credentials it copies into a Secret of its own making,
+`pgpilot-<monitor>-credentials`, owned by the monitor, so that the pod can
+read them the same way and its template holds no password.
 
-- The operator may `get` a Secret by name and nothing else: no list, no watch,
+- That generated Secret is the only one the operator writes (`create`,
+  `patch`, `delete`). The role cannot tie those verbs to a name: it allows
+  them for every Secret of the cluster, and whoever got hold of the
+  operator's ServiceAccount token could overwrite or delete any of them, or
+  have a token made for any ServiceAccount. The operator's code is what
+  keeps to the one Secret, by never writing to a Secret that the monitor
+  does not control. One that already carries the name is left alone and
+  reported as `NameConflict`.
+- The generated Secret is removed when the monitor no longer has inline
+  credentials and no pod reads it any more, that is, once the pod of the new
+  template is available. It cannot be named as the monitor's own
+  `credentialsSecret` (`GeneratedSecretReferenced`).
+- Otherwise the operator may `get` a Secret by name and nothing else: no list, no watch,
   and Secrets are never cached.
 - Because nothing watches Secrets, the one a monitor references is read again
   periodically (five minutes by default). A token derived from the Secret

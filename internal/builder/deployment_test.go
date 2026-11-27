@@ -272,38 +272,6 @@ func TestBuildDeployment_EnvVars(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_EnvVars_Inline(t *testing.T) {
-	monitor := newTestMonitor()
-	monitor.Spec.Database.CredentialsSecret = nil
-	monitor.Spec.Database.Username = "alice"
-	monitor.Spec.Database.Password = "s3cret"
-	merged := MergedMetrics{}
-	dep := BuildDeployment(monitor, merged, PodTemplateVersions{Config: "h"})
-
-	envs := dep.Spec.Template.Spec.Containers[0].Env
-	var gotUser, gotPass string
-	for _, e := range envs {
-		if e.Name == "PGUSER" {
-			gotUser = e.Value
-			if e.ValueFrom != nil {
-				t.Error("PGUSER should be literal value when credentials are inline")
-			}
-		}
-		if e.Name == "PGPASSWORD" {
-			gotPass = e.Value
-			if e.ValueFrom != nil {
-				t.Error("PGPASSWORD should be literal value when credentials are inline")
-			}
-		}
-	}
-	if gotUser != "alice" {
-		t.Errorf("PGUSER: got %q, want %q", gotUser, "alice")
-	}
-	if gotPass != "s3cret" {
-		t.Errorf("PGPASSWORD: got %q, want %q", gotPass, "s3cret")
-	}
-}
-
 func TestBuildDeployment_ConfigHashAnnotation(t *testing.T) {
 	monitor := newTestMonitor()
 	merged := MergedMetrics{}

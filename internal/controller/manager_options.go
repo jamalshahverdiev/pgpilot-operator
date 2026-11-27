@@ -71,8 +71,9 @@ func (o Options) Validate() error {
 // to run these controllers with the permissions the operator ships with.
 //
 // main and the test suite both build their manager through this function, so
-// that what is tested is what runs: with the role limited to `get` on
-// Secrets, a manager without these settings would hang on its first Secret.
+// that what is tested is what runs: with a role that may neither list nor
+// watch Secrets, a manager without these settings would hang on its first
+// Secret.
 func ManagerOptions(base ctrl.Options, opts Options) ctrl.Options {
 	base.Cache = CacheOptions(opts.ServiceMonitorEnabled)
 	base.Client = ClientOptions()
@@ -178,8 +179,8 @@ func CacheOptions(serviceMonitorEnabled bool) cache.Options {
 //
 // A cached read would start a watch on every Secret of the cluster and keep
 // them all, with their data, in the operator's memory. The operator only ever
-// needs the one Secret a monitor points at, and its role grants no more than
-// `get` on Secrets.
+// needs the one Secret a monitor points at, and its role grants neither
+// `list` nor `watch` on Secrets.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{

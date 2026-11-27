@@ -264,6 +264,8 @@ func kindOf(obj client.Object) string {
 		return "Deployment"
 	case *corev1.Service:
 		return "Service"
+	case *corev1.Secret:
+		return "Secret"
 	case *monitoringv1.ServiceMonitor:
 		return "ServiceMonitor"
 	}
