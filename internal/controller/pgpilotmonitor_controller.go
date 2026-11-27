@@ -74,6 +74,10 @@ const (
 	// ServiceMonitor of a monitor is deleted because its Prometheus sink was
 	// turned off.
 	eventScrapeTargetRemoved = "ScrapeTargetRemoved"
+	// eventCredentialsSecretRemoved is recorded when the Secret generated
+	// from inline credentials is deleted because the monitor no longer has
+	// any.
+	eventCredentialsSecretRemoved = "CredentialsSecretRemoved"
 	// legacyConditionDatabaseReachable is the name the condition above had
 	// in earlier releases. Nothing ever connected to the database to set it,
 	// so the name promised more than it checked.
@@ -145,7 +149,14 @@ func (r *PgpilotMonitorReconciler) credentialsRetry() time.Duration {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // Secrets are only ever read one at a time, by name: no list, no watch. The
 // manager's client is configured not to cache them (see ClientOptions).
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// The one Secret the operator writes is the one it generates from the
+// inline credentials of a monitor (builder.BuildCredentialsSecret): created
+// and updated by server-side apply, which needs create and patch, and deleted
+// when the monitor turns to a Secret of its own. RBAC cannot narrow these
+// verbs to a name pattern, so the role allows them for every Secret of the
+// cluster; what keeps the operator from other Secrets is its own code, which
+// never writes to an object the monitor does not control (see nameIsFree).
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
@@ -304,6 +315,23 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 	default:
 		out.requeueAfter = r.nextLookAtAHealthyMonitor(monitor, creds)
 	}
+
+	// --- Step 8: The Secret of inline credentials the monitor had before. ---
+	// Not before every pod reads its credentials elsewhere. The pod of the
+	// previous template names the generated Secret for as long as it runs,
+	// and it runs until the new one is available: for good, when the new one
+	// cannot start. A pod that is started again asks for the Secret again.
+	//
+	// A removal that fails is the operator's to retry. It does not change
+	// what the monitor is: the collector runs, and the status says so.
+	if ready && !builder.HasInlineCredentials(monitor) {
+		if stop := r.remove(ctx, monitor, builder.BuildCredentialsSecret(monitor), removal{
+			event: eventCredentialsSecretRemoved,
+			why:   "the monitor no longer has inline credentials, and no pod reads it any more",
+		}); stop != nil {
+			out.err = stop.err
+		}
+	}
 	return out
 }
 
@@ -346,11 +374,12 @@ func (r *PgpilotMonitorReconciler) syncScrapeTargets(ctx context.Context, status
 
 	if !builder.PrometheusSinkEnabled(monitor) {
 		status.drop(conditionServiceMonitor)
-		if stop := r.remove(ctx, monitor, service); stop != nil {
+		sinkOff := removal{event: eventScrapeTargetRemoved, why: "the Prometheus sink is off"}
+		if stop := r.remove(ctx, monitor, service, sinkOff); stop != nil {
 			return stop
 		}
 		if r.ServiceMonitorEnabled {
-			return r.remove(ctx, monitor, serviceMonitor)
+			return r.remove(ctx, monitor, serviceMonitor, sinkOff)
 		}
 		return nil
 	}
@@ -525,8 +554,15 @@ func (r *PgpilotMonitorReconciler) nameIsFree(
 	return &nameTakenError{owner: owner}
 }
 
+// removal says why a generated object is removed: the reason of the event
+// that reports it, and the clause that ends its message.
+type removal struct {
+	event, why string
+}
+
 // remove deletes a generated object the spec no longer asks for. Only an
-// object the monitor controls is deleted; the cache holds all of those.
+// object the monitor controls is deleted. The cache holds all of those
+// except Secrets, which are read from the API server each time.
 //
 // What was removed is said in an event and in the log, there and then: the
 // status of the monitor need not change with it, and finish records events
@@ -535,6 +571,7 @@ func (r *PgpilotMonitorReconciler) remove(
 	ctx context.Context,
 	monitor *pgpilotv1.PgpilotMonitor,
 	obj client.Object,
+	because removal,
 ) *outcome {
 	kind := obj.GetObjectKind().GroupVersionKind().Kind
 	existing, ok := obj.DeepCopyObject().(client.Object)
@@ -542,18 +579,34 @@ func (r *PgpilotMonitorReconciler) remove(
 		return nil
 	}
 	err := r.Get(ctx, client.ObjectKeyFromObject(obj), existing)
-	if err == nil && metav1.IsControlledBy(existing, monitor) {
-		// Only the object that was looked at: one created under the name
-		// since is not this one.
-		uid := existing.GetUID()
-		if err = r.Delete(ctx, existing, client.Preconditions{UID: &uid}); err == nil {
-			logf.FromContext(ctx).Info("removed an object the Prometheus sink no longer needs",
-				"kind", kind, "name", obj.GetName())
-			r.Recorder.Eventf(monitor, corev1.EventTypeNormal, eventScrapeTargetRemoved,
-				"%s %s removed: the Prometheus sink is off", kind, obj.GetName())
+	switch {
+	case apiIsGone(err):
+		return nil
+	case err != nil:
+		// Whether there is anything to remove is not known. Most of the
+		// time there is not, and to say that something could not be
+		// removed would be wrong.
+		return &outcome{
+			reason: reasonApplyFailed,
+			message: fmt.Sprintf("%s %s could not be looked for, to remove it if the monitor still has it: %v",
+				kind, obj.GetName(), err),
+			err: fmt.Errorf("look for %s %s: %w", strings.ToLower(kind), obj.GetName(), err),
 		}
+	case !metav1.IsControlledBy(existing, monitor):
+		return nil
 	}
-	if err == nil || apiIsGone(err) {
+	// Only the object that was looked at: one created under the name since
+	// is not this one.
+	uid := existing.GetUID()
+	err = r.Delete(ctx, existing, client.Preconditions{UID: &uid})
+	switch {
+	case err == nil:
+		logf.FromContext(ctx).Info("removed a generated object that is no longer wanted",
+			"kind", kind, "name", obj.GetName(), "because", because.why)
+		r.Recorder.Eventf(monitor, corev1.EventTypeNormal, because.event,
+			"%s %s removed: %s", kind, obj.GetName(), because.why)
+		return nil
+	case apiIsGone(err):
 		return nil
 	}
 	return &outcome{
@@ -586,10 +639,11 @@ func (r *PgpilotMonitorReconciler) releaseFinalizer(ctx context.Context, monitor
 
 // credentials is what resolveCredentials found out about a monitor.
 type credentials struct {
-	// fromSecret is true when the credentials come from a referenced Secret.
+	// fromSecret is true when the credentials come from a referenced Secret,
+	// which nothing but a periodic look tells the operator about.
 	fromSecret bool
-	// version changes whenever that Secret changes; empty for inline
-	// credentials.
+	// version changes whenever the Secret the pod reads changes: the
+	// referenced one, or the one generated from inline credentials.
 	version string
 }
 
@@ -606,6 +660,11 @@ type credentials struct {
 // in status and looked at again after CredentialsRetry. The reconcile fails
 // only when the Secret could not be read at all, so that the work queue
 // retries with backoff and the failure counts as a reconcile error.
+//
+// For inline credentials it does more than check: it writes the Secret the
+// pod reads them from (builder.BuildCredentialsSecret), and ends like any
+// other apply when that cannot be written: NameConflict for a Secret of that
+// name that is not the monitor's, ApplyRejected or ApplyFailed otherwise.
 func (r *PgpilotMonitorReconciler) resolveCredentials(
 	ctx context.Context,
 	status *monitorStatus,
@@ -622,10 +681,18 @@ func (r *PgpilotMonitorReconciler) resolveCredentials(
 	}
 
 	switch {
-	case db.Username != "" && db.Password != "":
+	case builder.HasInlineCredentials(monitor):
+		// The pod does not get them as plain values: see
+		// builder.BuildCredentialsSecret. What the apply returns is the
+		// Secret as stored, and its version moves when its content does.
+		generated := builder.BuildCredentialsSecret(monitor)
+		if stop := r.apply(ctx, monitor, generated); stop != nil {
+			status.set(conditionCredentials, metav1.ConditionFalse, stop.reason, stop.message)
+			return credentials{}, stop
+		}
 		status.set(conditionCredentials, metav1.ConditionTrue, "InlineCredentials",
-			"Inline username and password are set")
-		return credentials{}, nil
+			fmt.Sprintf("Inline username and password are set; the collector reads them from Secret %q", generated.Name))
+		return credentials{version: credentialsVersion(generated)}, nil
 
 	case db.CredentialsSecret != nil:
 		ref := db.CredentialsSecret
@@ -639,6 +706,21 @@ func (r *PgpilotMonitorReconciler) resolveCredentials(
 			stop := unavailable(reasonSecretReadFailed, fmt.Sprintf("Secret %q could not be read: %v", ref.Name, err))
 			stop.requeueAfter = 0
 			stop.err = fmt.Errorf("read credentials secret %q: %w", ref.Name, err)
+			return credentials{}, stop
+		}
+
+		// The Secret the operator generated for this monitor, named as if
+		// it were the user's. It is removed when a monitor has no inline
+		// credentials, which is now: the pod would be left reading a Secret
+		// that is gone. A Secret of that name that is not the monitor's is
+		// the user's, and as good as any other.
+		if ref.Name == builder.CredentialsSecretName(monitor.Name) && metav1.IsControlledBy(&secret, monitor) {
+			stop := unavailable(reasonGeneratedSecretReferenced, fmt.Sprintf(
+				"Secret %q is the one the operator generates from inline credentials, and removes once a "+
+					"monitor has none. It cannot be the monitor's credentialsSecret: copy it under another name "+
+					"and name that, or keep the inline credentials. Nothing is changed until then", ref.Name))
+			// A mistake in the spec: looking again does not change it.
+			stop.requeueAfter = 0
 			return credentials{}, stop
 		}
 

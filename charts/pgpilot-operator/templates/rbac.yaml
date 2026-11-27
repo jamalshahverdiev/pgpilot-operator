@@ -15,10 +15,13 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
-  # Secrets are read one at a time, by name; never listed or watched.
+  # Secrets are read one at a time, by name; never listed or watched. The one
+  # Secret the operator writes is pgpilot-<monitor>-credentials, generated for
+  # a monitor with inline credentials; it never writes to a Secret that is
+  # not controlled by the monitor.
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get]
+    verbs: [create, delete, get, patch]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [create, delete, get, list, patch, update, watch]

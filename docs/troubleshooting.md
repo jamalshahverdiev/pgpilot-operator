@@ -25,6 +25,7 @@ error):
 | `PodCreateFailed` | No pod could be created at all: a ResourceQuota, a LimitRange, Pod Security admission. The message is the API server's |
 | `RolloutStuck` | The rollout made no progress for ten minutes and nothing more specific is known. Look at `kubectl describe deploy,rs,pod -l pgpilot.io/monitor=<name>` |
 | `SecretNotFound`, `SecretKeyMissing`, `SecretReadFailed`, `NoCredentials` | Credentials, see below |
+| `GeneratedSecretReferenced` | `spec.database.credentialsSecret` names `pgpilot-<name>-credentials`, the Secret the operator generates from inline credentials and removes once a monitor has none. Create a Secret of your own under another name, with the same `username` and `password`, and name that; or keep the inline credentials. Nothing is changed for the monitor until then |
 | `LibraryResolveFailed` | A referenced metric library is missing, see below |
 | `InvalidMetric` | A metric definition, of a library or of the monitor itself, was stored before a validation rule existed and breaks it, see below |
 | `InvalidPreset` | See [Monitor reports InvalidPreset](#monitor-reports-invalidpreset) |
@@ -52,8 +53,8 @@ what it is waiting for:
 - a missing Secret, Secret key or metric library, and `NameConflict`: every
   30 seconds;
 - `ApplyRejected`: every five minutes;
-- `InvalidName`, `InvalidPreset` and `NoSinkEnabled`: not until the monitor is
-  changed;
+- `InvalidName`, `InvalidPreset`, `NoSinkEnabled` and
+  `GeneratedSecretReferenced`: not until the monitor is changed;
 - `InvalidMetric`: not until the monitor, or the library that is named, is
   changed;
 - `SecretReadFailed`, `ApplyFailed`, `ConfigBuildFailed`: retried with
@@ -183,8 +184,9 @@ spec and a new pgwatch version do not reach it.
 ### NameConflict
 
 Everything the operator generates for a monitor is named after it:
-`pgpilot-<name>` (Deployment, Service, ServiceMonitor) and
-`pgpilot-<name>-config` (ConfigMap). When an object of that kind and name is
+`pgpilot-<name>` (Deployment, Service, ServiceMonitor),
+`pgpilot-<name>-config` (ConfigMap) and, for a monitor with inline
+credentials, `pgpilot-<name>-credentials` (Secret). When an object of that kind and name is
 already in the namespace and was not generated for this monitor, the operator
 leaves it exactly as it is and reports the conflict; the message names the
 object and who owns it. It does not write to it, and it would not delete it
@@ -207,7 +209,7 @@ gone the old collector keeps running as it was, and no change of the monitor
 or of its Secret reaches it. Delete them and the operator creates its own:
 
 ```bash
-kubectl delete deployment,service,configmap -n <namespace> -l pgpilot.io/monitor=<name>
+kubectl delete deployment,service,configmap,secret -n <namespace> -l pgpilot.io/monitor=<name>
 kubectl delete servicemonitor -n <namespace> -l pgpilot.io/monitor=<name>   # with the prometheus-operator
 ```
 
@@ -535,6 +537,9 @@ missing).
 - `Warning/NamespaceTagReplaced` — `spec.database.customTags` has a `namespace`
   key with another value than the monitor's namespace. The tag is the
   operator's; the value is not used. Use another key
+- `Normal/CredentialsSecretRemoved` — the Secret the operator generated from
+  inline credentials was deleted, because the monitor now names a Secret of
+  its own
 - `Normal/ScrapeTargetRemoved` — the Service or the ServiceMonitor of a
   monitor was deleted because its Prometheus sink is off
 - `Warning/ServiceMonitorAPIMissing` — see
@@ -550,7 +555,15 @@ the current state; events expire.
 
 Condition reasons on `CredentialsAvailable`:
 
-- `InlineCredentials` — spec uses inline `username`/`password`
+- `InlineCredentials` — spec uses inline `username`/`password`; the operator keeps
+  them in the Secret `pgpilot-<monitor>-credentials` for the pod to read
+- `NameConflict` — a Secret of that name exists and is not the monitor's, see
+  [NameConflict](#nameconflict)
+- `ApplyFailed` — that Secret could not be written; the usual reason is an
+  operator newer than its ClusterRole (`is forbidden: ... cannot patch
+  resource "secrets"`, or `cannot create`, in the message)
+- `GeneratedSecretReferenced` — `credentialsSecret` names the Secret the
+  operator generates; see the table at the top
 - `CredentialsFound` — the `credentialsSecret` exists and has a value under both keys
 - `SecretNotFound` — the referenced Secret is missing
 - `SecretKeyMissing` — the Secret exists but has no value under the key named in the
@@ -566,7 +579,10 @@ for that. (Up to v1.0.2 this condition was called `DatabaseReachable`.)
 
 ## Rotating the database password
 
-Update the Secret. The operator does not watch Secrets; it reads the one a
+With inline credentials, change `spec.database.password`: the operator updates
+the Secret it generated and replaces the collector pod at once.
+
+With a Secret of your own, update the Secret. The operator does not watch Secrets; it reads the one a
 monitor references again every five minutes and, when the Secret has changed,
 replaces the collector pod so that pgwatch starts with the new values. Until
 then pgwatch keeps using the old password.

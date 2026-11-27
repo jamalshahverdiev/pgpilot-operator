@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
@@ -408,15 +409,155 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 		}, 5*time.Second, interval).Should(Succeed())
 	})
 
-	It("marks inline credentials as available and adds no credentials version", func() {
+	// Inline credentials used to be plain values in the pod template: there
+	// for everyone to read who may look at a Deployment, kept in the
+	// ReplicaSets of earlier revisions, and rewritten by the kubelet where
+	// they held "$$" or "$(NAME)".
+	It("keeps inline credentials in a Secret of its own, out of the pod template", func() {
+		const password = "Pa$$w0rd-$(PGUSER)"
+		m := newMonitor(nil)
+		m.Spec.Database.Username, m.Spec.Database.Password = "pgwatch", password
+		createForSpec(m)
+		expectAvailable("InlineCredentials")
+
+		generatedKey := types.NamespacedName{Name: "pgpilot-" + monitorName + "-credentials", Namespace: ns}
+		var generated corev1.Secret
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(context.TODO(), generatedKey, &generated)).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+		Expect(generated.Data).To(Equal(map[string][]byte{"username": []byte("pgwatch"), "password": []byte(password)}))
+		Expect(generated.Type).To(Equal(corev1.SecretTypeOpaque))
+		Expect(metav1.GetControllerOf(&generated)).To(HaveField("Name", monitorName))
+
+		var version string
+		Eventually(func(g Gomega) {
+			dep := deployment(g)
+			env := dep.Spec.Template.Spec.Containers[0].Env
+			g.Expect(env).To(HaveLen(2))
+			for _, e := range env {
+				g.Expect(e.Value).To(BeEmpty(), e.Name)
+				g.Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(generatedKey.Name), e.Name)
+			}
+			g.Expect(dep.Spec.RevisionHistoryLimit).To(HaveValue(BeZero()))
+			version = credentialsVersionOf(g)
+			g.Expect(version).NotTo(BeEmpty(), "the pod template must say which state of the Secret it was made for")
+		}, timeout, interval).Should(Succeed())
+
+		By("applying the same credentials again without replacing the pod")
+		generation := deployment(Default).Generation
+		touched := &pgpilotv1.PgpilotMonitor{}
+		touched.Name, touched.Namespace = monitorName, ns
+		Expect(k8sClient.Patch(context.TODO(), touched, client.RawPatch(types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"test/look-again":"1"}}}`)))).To(Succeed())
+		Consistently(func(g Gomega) {
+			g.Expect(credentialsVersionOf(g)).To(Equal(version))
+			g.Expect(deployment(g).Generation).To(Equal(generation))
+		}, 3*time.Second, interval).Should(Succeed())
+
+		By("handing a changed password on, and replacing the pod for it")
+		Eventually(func(g Gomega) {
+			var stored pgpilotv1.PgpilotMonitor
+			g.Expect(k8sClient.Get(context.TODO(), monitorKey, &stored)).To(Succeed())
+			stored.Spec.Database.Password = "rotated"
+			g.Expect(k8sClient.Update(context.TODO(), &stored)).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(context.TODO(), generatedKey, &generated)).To(Succeed())
+			g.Expect(generated.Data).To(HaveKeyWithValue("password", []byte("rotated")))
+			g.Expect(credentialsVersionOf(g)).NotTo(Equal(version))
+		}, timeout, interval).Should(Succeed())
+
+		By("removing the generated Secret when the monitor turns to a Secret of its own")
+		createForSpec(newSecret(map[string]string{"username": "pgwatch", "password": "s3cret"}))
+		Eventually(func(g Gomega) {
+			var stored pgpilotv1.PgpilotMonitor
+			g.Expect(k8sClient.Get(context.TODO(), monitorKey, &stored)).To(Succeed())
+			stored.Spec.Database.Username, stored.Spec.Database.Password = "", ""
+			stored.Spec.Database.CredentialsSecret = bySecret
+			g.Expect(k8sClient.Update(context.TODO(), &stored)).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+		Eventually(func(g Gomega) {
+			for _, e := range deployment(g).Spec.Template.Spec.Containers[0].Env {
+				g.Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(secretName), e.Name)
+			}
+		}, timeout, interval).Should(Succeed())
+		// The pod of the previous template still reads the generated
+		// Secret, and nothing here has replaced it yet.
+		Consistently(func(g Gomega) {
+			g.Expect(k8sClient.Get(context.TODO(), generatedKey, &corev1.Secret{})).To(Succeed())
+		}, 2*time.Second, interval).Should(Succeed())
+		becomeReady()
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(context.TODO(), generatedKey, &corev1.Secret{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the generated Secret is still there: %v", err)
+		}, timeout, interval).Should(Succeed())
+		// The monitor's own Secret is not the operator's to remove.
+		Expect(k8sClient.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: ns}, &corev1.Secret{})).
+			To(Succeed())
+	})
+
+	// What an upgrade meets: a Deployment that the previous release applied,
+	// with the credentials as plain values and the default history of
+	// revisions. The same field manager wrote it, so the apply that names
+	// the Secret also takes the values out.
+	It("moves the literal credentials of an earlier release out of the pod template", func() {
+		createForSpec(newMonitor(bySecret))
+		expectUnavailable("SecretNotFound", secretName) // nothing is generated yet
+
+		var stored pgpilotv1.PgpilotMonitor
+		Expect(k8sClient.Get(context.TODO(), monitorKey, &stored)).To(Succeed())
+		inline := stored.DeepCopy()
+		inline.Spec.Database.CredentialsSecret = nil
+		inline.Spec.Database.Username, inline.Spec.Database.Password = "pgwatch", "s3cret"
+		earlier := builder.BuildDeployment(inline, builder.MergedMetrics{Preset: "basic"},
+			builder.PodTemplateVersions{Config: "of-the-earlier-release"})
+		earlier.Spec.RevisionHistoryLimit = nil
+		earlier.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "PGUSER", Value: "pgwatch"}, {Name: "PGPASSWORD", Value: "s3cret"},
+		}
+		Expect(controllerutil.SetControllerReference(&stored, earlier, scheme.Scheme)).To(Succeed())
+		//nolint:staticcheck // SA1019: the way the operator applies, see serverSideApply
+		Expect(k8sClient.Patch(context.TODO(), earlier, client.Apply,
+			client.FieldOwner("pgpilot-operator"), client.ForceOwnership)).To(Succeed())
+		Expect(deployment(Default).Spec.Template.Spec.Containers[0].Env[1].Value).To(Equal("s3cret"))
+		Expect(deployment(Default).Spec.RevisionHistoryLimit).To(HaveValue(BeEquivalentTo(10)))
+
+		Eventually(func(g Gomega) {
+			var m pgpilotv1.PgpilotMonitor
+			g.Expect(k8sClient.Get(context.TODO(), monitorKey, &m)).To(Succeed())
+			m.Spec.Database.CredentialsSecret = nil
+			m.Spec.Database.Username, m.Spec.Database.Password = "pgwatch", "s3cret"
+			g.Expect(k8sClient.Update(context.TODO(), &m)).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			dep := deployment(g)
+			env := dep.Spec.Template.Spec.Containers[0].Env
+			g.Expect(env).To(HaveLen(2))
+			for _, e := range env {
+				g.Expect(e.Value).To(BeEmpty(), e.Name)
+				g.Expect(e.ValueFrom).NotTo(BeNil(), e.Name)
+				g.Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal("pgpilot-"+monitorName+"-credentials"), e.Name)
+			}
+			g.Expect(dep.Spec.RevisionHistoryLimit).To(HaveValue(BeZero()))
+			g.Expect(condition(g, "Ready").Reason).NotTo(BeElementOf("ApplyRejected", "ApplyFailed"))
+		}, timeout, interval).Should(Succeed())
+	})
+
+	It("does not take a Secret that carries the name of the generated one", func() {
+		foreign := &corev1.Secret{StringData: map[string]string{"token": "not the operator's"}}
+		foreign.Name, foreign.Namespace = "pgpilot-"+monitorName+"-credentials", ns
+		createForSpec(foreign)
 		m := newMonitor(nil)
 		m.Spec.Database.Username, m.Spec.Database.Password = "pgwatch", "s3cret"
 		createForSpec(m)
 
-		expectAvailable("InlineCredentials")
-		Eventually(func(g Gomega) {
-			g.Expect(deployment(g).Spec.Template.Annotations).NotTo(HaveKey(builder.AnnotationCredentialsVersion))
-		}, timeout, interval).Should(Succeed())
+		expectUnavailable("NameConflict", "Secret pgpilot-"+monitorName+"-credentials already exists and is not this monitor's")
+		expectNoDeployment()
+		var stored corev1.Secret
+		Expect(k8sClient.Get(context.TODO(), client.ObjectKeyFromObject(foreign), &stored)).To(Succeed())
+		Expect(stored.Data).To(Equal(map[string][]byte{"token": []byte("not the operator's")}))
+		Expect(stored.OwnerReferences).To(BeEmpty())
 	})
 
 	// Nothing has to be read again for inline credentials, and nothing a
@@ -485,7 +626,7 @@ var _ = Describe("PgpilotMonitor credentials", func() {
 // suite setup) and the production cache options. These specs pin what that
 // means for the data it can reach and the data it keeps.
 var _ = Describe("Operator access", func() {
-	It("can read a Secret by name but cannot list or watch Secrets", func() {
+	It("can read a Secret by name but cannot list, watch or update Secrets", func() {
 		ns := testNamespace("test-access-")
 		secret := &corev1.Secret{StringData: map[string]string{"username": "u"}}
 		secret.Name, secret.Namespace = "one", ns
@@ -508,14 +649,16 @@ var _ = Describe("Operator access", func() {
 		_, err = watching.Watch(context.TODO(), &list, client.InNamespace(ns))
 		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "watching Secrets must be forbidden, got: %v", err)
 
+		// What the role does allow, for the Secret generated from inline
+		// credentials, is create, patch and delete. RBAC cannot tie those to
+		// a name; that the operator only uses them on a Secret its monitor
+		// controls is what the specs about that Secret show. What it never
+		// needs stays forbidden.
 		for name, change := range map[string]func() error{
-			"create": func() error {
-				s := &corev1.Secret{}
-				s.Name, s.Namespace = "written-by-operator", ns
-				return asOperator.Create(context.TODO(), s)
-			},
 			"update": func() error { return asOperator.Update(context.TODO(), got.DeepCopy()) },
-			"delete": func() error { return asOperator.Delete(context.TODO(), got.DeepCopy()) },
+			"deleting all of a namespace": func() error {
+				return asOperator.DeleteAllOf(context.TODO(), &corev1.Secret{}, client.InNamespace(ns))
+			},
 		} {
 			Expect(apierrors.IsForbidden(change())).To(BeTrue(), "%s of a Secret must be forbidden", name)
 		}

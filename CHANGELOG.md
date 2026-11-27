@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+### Inline credentials
+
+- An inline `spec.database.password` no longer shows in the collector's pod
+  template. It was written there as the plain value of `PGPASSWORD`: readable
+  by everyone who may look at a Deployment, a ReplicaSet or a Pod (the
+  built-in `view` role, which may read neither Secrets nor the monitor), and
+  kept in the ReplicaSets of earlier revisions after it was changed. The
+  operator now generates a Secret, `pgpilot-<monitor>-credentials`, owned by
+  the monitor, and the pod reads `PGUSER` and `PGPASSWORD` from it. The
+  password is still in the PgpilotMonitor itself; a Secret of your own
+  (`credentialsSecret`) remains the way to keep it out of there.
+- A password with `$$` or `$(NAME)` in it arrives unchanged. As a plain
+  value the kubelet rewrote it (`Pa$$w0rd` became `Pa$w0rd`), and the
+  collector could not log in.
+- A changed inline password replaces the collector pod, as a changed Secret
+  does.
+- The collector's Deployment keeps no ReplicaSets of earlier revisions
+  (`revisionHistoryLimit: 0`). Nothing rolls back to one, and they are where
+  an inline password of an earlier release would stay.
+
+Upgrade notes:
+
+- **The operator's ClusterRole changes on Secrets**: `get`, `list`, `watch`
+  in the last release; `get`, `create`, `patch`, `delete` in this one. `list`
+  and `watch` are gone (see "Credentials" below); `create`, `patch` and
+  `delete` are new, and are what generating that Secret takes. RBAC cannot
+  limit them to a name, so the role allows them for every Secret of the
+  cluster: whoever holds the operator's ServiceAccount token could overwrite
+  or delete any Secret, or have a token made for any ServiceAccount. The
+  operator itself uses them for the Secret it generates and for no other: a
+  Secret of that name that is not the monitor's is left as it is, and the
+  monitor reports `NameConflict`. Upgrade the role together with the image,
+  as `helm upgrade` does; a new operator under the old role reports
+  `ApplyFailed` for every monitor with inline credentials and leaves their
+  collectors as they are.
+- The ReplicaSets of earlier revisions of a collector are removed once its
+  pod of the new template is available, and with them the inline passwords
+  they held. A password that was readable there should be considered seen:
+  rotate it if that matters. This happens for a monitor the operator
+  reconciles to the end. One that reports `NameConflict`, `ApplyFailed`,
+  `InvalidMetric`, `InvalidPreset`, `LibraryResolveFailed`, `InvalidName` or
+  `NoSinkEnabled` keeps the Deployment and the ReplicaSets of the earlier
+  release, password included, until that is corrected. To find Deployments
+  that still hold one:
+
+  ```bash
+  kubectl get deployments -A -l app.kubernetes.io/managed-by=pgpilot-operator -o json | jq -r '
+    .items[] | select(any(.spec.template.spec.containers[].env[]?; .name == "PGPASSWORD" and .value != null))
+    | "\(.metadata.namespace)/\(.metadata.name)"'
+  ```
+- A username or password that was written with doubled `$` to make an
+  earlier release log in (`a$$$$b` for the password `a$$b`) now arrives as
+  written: set it back to the real value when upgrading. The monitor is
+  `Ready` either way; a failed login shows in the pod's log and in
+  `pgwatch_instance_up`.
+- `pgpilot-<monitor>-credentials` cannot be named as the monitor's own
+  `credentialsSecret`: the operator removes it once a monitor has no inline
+  credentials. Such a monitor reports `GeneratedSecretReferenced` and is left
+  as it is. To move from inline credentials to a Secret, create one under
+  another name.
+- The generated Secret of a monitor that turns to a Secret of its own is
+  removed once the pod of the new template is available, not before: until
+  then the pod that runs still reads it.
+- `kubectl rollout undo` on a collector's Deployment has nothing to go back
+  to. It never lasted: the operator applies the pod template again.
+
 ### The collector pod
 
 - A monitor with the gRPC sink alone gets a collector that becomes ready.
@@ -191,7 +257,8 @@ Upgrade notes:
   When it starts, the operator takes `pgpilot.io/finalizer` off the monitors
   that still carry it; a monitor that is being deleted is let go at once.
 - An object that already carries the name of a generated one (`pgpilot-<name>`,
-  `pgpilot-<name>-config`) and is not the monitor's is left alone.
+  `pgpilot-<name>-config`, `pgpilot-<name>-credentials`) and is not the
+  monitor's is left alone.
   The monitor reports `NameConflict` and names the object. Such an object
   used to be overwritten, given the monitor as its owner and deleted together
   with it; anyone allowed to create a PgpilotMonitor could rewrite a Service
@@ -576,8 +643,9 @@ Upgrade notes:
 
 ### Credentials
 
-- The operator no longer lists or watches Secrets. Its role grants `get` on
-  Secrets only, and Secrets are never cached: it used to keep every Secret of
+- The operator no longer lists or watches Secrets. It reads them one at a
+  time, by name (for what its role allows besides, see "Inline credentials"
+  above), and Secrets are never cached: it used to keep every Secret of
   the cluster, with its data, in memory. ConfigMaps, Deployments, Services,
   Pods and ServiceMonitors are cached only when they carry the operator's
   `managed-by` label, so the operator's memory no longer grows with the size of
@@ -611,8 +679,7 @@ Upgrade notes:
   Do not pin `image.tag` to an older version with the new chart.
 - Every collector that takes its credentials from a Secret is restarted once
   when the operator is upgraded (its pod template gains the
-  `pgpilot.io/credentials-version` annotation). Monitors with inline
-  credentials are not restarted.
+  `pgpilot.io/credentials-version` annotation).
 - From then on any change to a referenced Secret object restarts the
   collector, also a change to its labels or annotations only.
 

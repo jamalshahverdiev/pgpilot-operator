@@ -79,7 +79,10 @@ type DatabaseRef struct {
 	SSLMode SSLMode `json:"sslmode,omitempty"`
 
 	// username is the database user. Prefer credentialsSecret for production
-	// — values set here are stored in etcd in clear text.
+	// — values set here are part of this object, stored in etcd in clear
+	// text and readable by everyone who may read it. The operator hands them
+	// to the collector through a Secret it generates,
+	// pgpilot-<name>-credentials.
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	Username string `json:"username,omitempty"`

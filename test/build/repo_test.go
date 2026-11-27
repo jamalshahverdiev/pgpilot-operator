@@ -523,8 +523,8 @@ func TestDependabot_CoversIndirectModulesAndAllEcosystems(t *testing.T) {
 
 // The envtest suite proves that the controllers work with the shipped role and
 // cache settings, but only for a manager built through the controller
-// package. main has to build its manager the same way: with `get` as the only
-// permission on Secrets, a manager without those settings stops at the first
+// package. main has to build its manager the same way: without `list` and
+// `watch` on Secrets, a manager without those settings stops at the first
 // Secret it reads.
 func TestMain_BuildsTheManagerThroughTheControllerPackage(t *testing.T) {
 	main := readRepoFile(t, "cmd/main.go")
