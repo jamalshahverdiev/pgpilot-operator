@@ -119,7 +119,10 @@ type PgpilotMetricLibraryStatus struct {
 	MetricCount int32 `json:"metricCount,omitempty"`
 
 	// conditions reflects the current state of the library.
-	// Typical types: "Valid" (syntactic validation of SQL/markers passes).
+	// "Valid" is True when every metric definition passes the rules of this
+	// CRD and can be handed to a collector, and False otherwise, with reason
+	// InvalidMetric (the message names the metric) or Empty. The SQL itself
+	// is not checked.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

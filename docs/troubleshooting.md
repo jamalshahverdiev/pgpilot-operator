@@ -26,6 +26,7 @@ error):
 | `RolloutStuck` | The rollout made no progress for ten minutes and nothing more specific is known. Look at `kubectl describe deploy,rs,pod -l pgpilot.io/monitor=<name>` |
 | `SecretNotFound`, `SecretKeyMissing`, `SecretReadFailed`, `NoCredentials` | Credentials, see below |
 | `LibraryResolveFailed` | A referenced metric library is missing, see below |
+| `InvalidMetric` | A metric definition, of a library or of the monitor itself, was stored before a validation rule existed and breaks it, see below |
 | `InvalidPreset` | See [Monitor reports InvalidPreset](#monitor-reports-invalidpreset) |
 | `InvalidName` | The monitor's name does not fit the generated objects, see below |
 | `NameConflict` | An object with the name of a generated one exists and is not this monitor's, see below |
@@ -51,6 +52,8 @@ what it is waiting for:
   30 seconds;
 - `ApplyRejected`: every five minutes;
 - `InvalidName` and `InvalidPreset`: not until the monitor is changed;
+- `InvalidMetric`: not until the monitor, or the library that is named, is
+  changed;
 - `SecretReadFailed`, `ApplyFailed`, `ConfigBuildFailed`: retried with
   growing pauses, from milliseconds up to about a quarter of an hour.
 
@@ -86,6 +89,61 @@ kubectl get pml -n <namespace>
 ```
 
 Fix: create the library or remove the reference.
+
+### InvalidMetric
+
+One of the metric definitions the monitor is made of breaks a rule:
+
+- a `sqls` key that is not a PostgreSQL major version written as a plain
+  integer (`"*"`, `"14.2"`, `"v14"`, `"170000"`),
+- an empty SQL statement, or no statement at all,
+- `masterOnly` together with `standbyOnly`,
+- an `interval` below one second,
+- a name that is not a lower-case identifier, or that is used twice in one
+  list.
+
+The API server refuses such a definition when it is written, so this is about
+objects stored by an operator release up to v1.0.2, before the rules existed.
+Those releases made what they could of them without a word: a key like `"*"`
+was dropped, and a metric left without any statement was handed to the
+collector with none. Others were collected as they were written (`"014"` was
+read as 14, the last of two metrics of one name was used); they are refused
+all the same and have to be corrected. The message names where the
+definition is (the `PgpilotMetricLibrary`, or `spec.metrics.custom` of the
+monitor), the metric and what is wrong with it. A name or a key longer than
+63 characters is shown up to there, with its length.
+
+The operator changes nothing for the monitor until the definition is
+corrected. A collector that runs keeps running with the configuration it has;
+a rotated Secret, a change of the spec and a new pgwatch release do not reach
+it. Correcting the definition is accepted by every Kubernetes version, also by
+those that refuse other changes to an object that breaks a rule:
+
+```bash
+kubectl edit pgpilotmetriclibrary <library> -n <namespace>
+```
+
+The monitor is reconciled as soon as the library, or its own spec, changes.
+
+A library says the same about itself in its `Valid` condition
+(`kubectl get pml <library> -o jsonpath='{.status.conditions}'`).
+
+On Kubernetes before 1.33 the API server does not let the operator write the
+status of an object that itself breaks a rule, and the operator logs
+`update status ... is invalid` for it:
+
+- A library that breaks a rule keeps the status it had, `Valid=True` if an
+  earlier release wrote it. The monitors that use it are where to look: they
+  report `InvalidMetric` and name the library.
+- A monitor whose own `spec.metrics.custom` breaks a rule keeps the status it
+  had as well, and `READY` can go on saying `true` although nothing is done
+  for it. What is wrong is said in a `Warning` event with reason
+  `InvalidMetric` on the monitor, recorded again at every attempt:
+
+  ```bash
+  kubectl describe pgpilotmonitor <name> -n <namespace>
+  kubectl get events -A --field-selector reason=InvalidMetric
+  ```
 
 ### PodNotReady
 
@@ -276,6 +334,12 @@ kubectl get pgpilotmonitors -A \
   -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,REPOSITORY:.spec.image.repository,TAG:.spec.image.tag'
 ```
 
+First look at the monitor's `Ready` condition and its events. A monitor that
+is not ready for a reason of its own (`InvalidMetric`, which shows up with
+this very upgrade, `InvalidPreset`, `InvalidName`, a missing Secret or
+library) is not changed at all until that is corrected, whatever its tag; see
+the table at the top.
+
 A monitor follows the operator's pgwatch release only while `spec.image.tag` is
 unset. Operator releases up to v1.0.2 wrote `tag: "5.1.0"` into every monitor
 they reconciled; the current operator removes that tag when it starts (an
@@ -347,6 +411,11 @@ image; mirror `cybertecpostgresql/pgwatch:6.2.0` to where the old one came
 from.
 
 ## ConfigMap not updating after spec change
+
+First look at the monitor's `Ready` condition: for a monitor that is not ready
+for a reason of its own (`InvalidMetric`, `InvalidPreset`, `InvalidName`, a
+missing Secret or library) nothing is generated until that is corrected, and
+the ConfigMap stays as it was; see the table at the top.
 
 The operator uses a content-hash annotation (`pgpilot.io/config-hash`) on the pod template to trigger rollouts. If the hash does not change, no rollout occurs.
 

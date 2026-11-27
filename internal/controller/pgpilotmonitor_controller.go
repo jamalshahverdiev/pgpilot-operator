@@ -215,6 +215,15 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 	}
 
 	// --- Step 3: Merge metrics. ---
+	// A definition the API server would refuse today can still be stored,
+	// from before it did. What would be rendered from one is not what its
+	// author meant; see builder.ValidateMetricDefinitions. A mistake in what
+	// is stored: retrying cannot fix it, and a change of the library or of
+	// the monitor starts a new reconcile.
+	if message := unusableMetrics(monitor, libraries); message != "" {
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, reasonInvalidMetric, message)
+		return outcome{reason: reasonInvalidMetric, message: message}
+	}
 	merged := builder.MergeMetrics(monitor.Spec.Metrics, libraries)
 
 	// --- Step 4: Build ConfigMap. ---
@@ -668,6 +677,24 @@ func (r *PgpilotMonitorReconciler) resolveLibraries(
 	return libs, nil
 }
 
+// unusableMetrics says which of the metric definitions a monitor is made of
+// cannot be used, and where it is to be corrected: the first library in the
+// order they are listed, then the monitor's own. It returns "" when all of
+// them can be used.
+func unusableMetrics(monitor *pgpilotv1.PgpilotMonitor, libraries []pgpilotv1.PgpilotMetricLibrary) string {
+	const consequence = "Nothing is changed for this monitor until that is corrected; " +
+		"a collector that runs keeps running as it was"
+	for i := range libraries {
+		if err := builder.ValidateMetricDefinitions(libraries[i].Spec.Metrics); err != nil {
+			return fmt.Sprintf("PgpilotMetricLibrary %s cannot be used: %v. %s", libraries[i].Name, err, consequence)
+		}
+	}
+	if err := builder.ValidateMetricDefinitions(monitor.Spec.Metrics.Custom); err != nil {
+		return fmt.Sprintf("spec.metrics.custom cannot be used: %v. %s", err, consequence)
+	}
+	return ""
+}
+
 func (r *PgpilotMonitorReconciler) serverSideApply(ctx context.Context, obj client.Object) error {
 	obj.SetManagedFields(nil)
 	obj.SetResourceVersion("")
@@ -730,9 +757,14 @@ func (r *PgpilotMonitorReconciler) libraryToMonitors(
 
 	var monitors pgpilotv1.PgpilotMonitorList
 	if err := r.List(ctx, &monitors, client.InNamespace(lib.Namespace)); err != nil {
-		// Nothing can be enqueued, and nothing retries this: say so.
+		// Nothing can be enqueued, and nothing retries this: say so. A
+		// monitor that is looked at periodically finds the change then; one
+		// that waits for this library to be corrected (InvalidMetric) does
+		// not.
 		logf.FromContext(ctx).Error(err, "a changed metric library could not be mapped to its monitors; "+
-			"they pick the change up at their next reconcile", "library", lib.Name, "namespace", lib.Namespace)
+			"they pick the change up at their next reconcile, which for a monitor that is not looked at "+
+			"periodically is the next change of the library or of the monitor",
+			"library", lib.Name, "namespace", lib.Namespace)
 		return nil
 	}
 

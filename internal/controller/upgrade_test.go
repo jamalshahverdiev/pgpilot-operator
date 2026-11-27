@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
@@ -60,6 +61,10 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 		// releaseNS holds a second set of the stale monitors, and one that
 		// breaks no rule, for the spec about the finalizer release.
 		releaseNS string
+		// libraryNS holds a library that breaks a new rule and a monitor,
+		// itself in order, that uses it, and monitors whose own definitions
+		// break one. All of them carry the status v1.0.2 gave them.
+		libraryNS string
 		// What the API server tolerates for an object whose stored spec
 		// breaks a rule, as long as the offending value is not changed:
 		// from Kubernetes 1.30 updates of the object itself, from 1.33 also
@@ -180,6 +185,43 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 		valid := minimalMonitor(releaseNS, "valid")
 		valid.SetFinalizers([]string{finalizerName})
 		Expect(c.Create(context.TODO(), valid)).To(Succeed())
+
+		forLibrary := &corev1.Namespace{}
+		forLibrary.GenerateName = "test-upgrade-library-"
+		Expect(c.Create(context.TODO(), forLibrary)).To(Succeed())
+		libraryNS = forLibrary.Name
+		librarySecret := &corev1.Secret{StringData: map[string]string{"username": "pgwatch", "password": "secret"}}
+		librarySecret.Name, librarySecret.Namespace = "pg-creds", libraryNS
+		Expect(c.Create(context.TODO(), librarySecret)).To(Succeed())
+		// The usual one: a statement for PostgreSQL 14 and one "for the
+		// rest", which no collector ever ran.
+		Expect(c.Create(context.TODO(), libraryOf(libraryNS, "old-rules", []any{map[string]any{
+			"name": "queue_depth", "sqls": map[string]any{"14": "SELECT 1 AS depth", "*": "SELECT 0 AS depth"},
+		}}))).To(Succeed(), "must be valid under the old CRDs, otherwise it proves nothing")
+		Expect(c.Create(context.TODO(), withSpec(minimalMonitor(libraryNS, "uses-old-rules"),
+			map[string]any{"fromLibraries": []any{map[string]any{"name": "old-rules"}}}, "metrics"))).To(Succeed())
+		// What v1.0.2 said of every library that had an entry.
+		oldRules := libraryOf(libraryNS, "old-rules", nil)
+		Expect(c.Status().Patch(context.TODO(), oldRules, client.RawPatch(types.MergePatchType, []byte(
+			`{"status":{"observedGeneration":1,"metricCount":1,"conditions":[{"type":"Valid","status":"True",`+
+				`"reason":"Valid","message":"Library contains metric definitions",`+
+				`"lastTransitionTime":"2026-01-01T00:00:00Z"}]}}`)))).To(Succeed())
+		for name, custom := range map[string][]any{
+			"inline-old-rules": {map[string]any{
+				"name": "queue_depth", "sqls": map[string]any{"14": "SELECT 1 AS depth", "*": "SELECT 0 AS depth"},
+			}},
+			"inline-duplicate": {
+				map[string]any{"name": "twice", "sqls": map[string]any{"14": "SELECT 1 AS depth"}},
+				map[string]any{"name": "twice", "sqls": map[string]any{"14": "SELECT 2 AS depth"}},
+			},
+		} {
+			inline := withSpec(minimalMonitor(libraryNS, name), map[string]any{"custom": custom}, "metrics")
+			Expect(c.Create(context.TODO(), inline)).To(Succeed(), "%s must be valid under the old CRDs", name)
+			// Collected and reported as running, as these were.
+			Expect(c.Status().Patch(context.TODO(), inline, client.RawPatch(types.MergePatchType, []byte(
+				`{"status":{"ready":true,"conditions":[{"type":"Ready","status":"True","reason":"PodRunning",`+
+					`"message":"pgwatch pod is running","lastTransitionTime":"2026-01-01T00:00:00Z"}]}}`)))).To(Succeed())
+		}
 
 		By("letting the v1.0.2 operator reconcile monitors that name no image, or pin one")
 		images := &corev1.Namespace{}
@@ -319,6 +361,130 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 			err = c.Get(context.TODO(), key, &monitor)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the object must be gone, got: %v", err)
 		}
+	})
+
+	// The API server does not look at a stored object again when a rule is
+	// added. What the operator would render from a definition that breaks
+	// one is not what its author meant, so it says which one it is instead.
+	Describe("a metric definition stored before the rules", Ordered, func() {
+		var monitorKey, libraryKey types.NamespacedName
+
+		conditionOf := func(conditions []metav1.Condition, condType string) metav1.Condition {
+			GinkgoHelper()
+			for _, cond := range conditions {
+				if cond.Type == condType {
+					return cond
+				}
+			}
+			Fail("no " + condType + " condition")
+			return metav1.Condition{}
+		}
+
+		BeforeAll(func() {
+			monitorKey = types.NamespacedName{Name: "uses-old-rules", Namespace: libraryNS}
+			libraryKey = types.NamespacedName{Name: "old-rules", Namespace: libraryNS}
+		})
+
+		// The monitor itself breaks no rule, so every API server takes its
+		// status.
+		It("is named by the monitor that uses it, and nothing is generated from it", func() {
+			_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{NamespacedName: monitorKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var monitor pgpilotv1.PgpilotMonitor
+			Expect(c.Get(context.TODO(), monitorKey, &monitor)).To(Succeed())
+			ready := conditionOf(monitor.Status.Conditions, "Ready")
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal("InvalidMetric"))
+			Expect(ready.Message).To(ContainSubstring(
+				`PgpilotMetricLibrary old-rules cannot be used: metric "queue_depth": sqls key "*" is not a PostgreSQL major version`))
+
+			err = c.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-uses-old-rules-config", Namespace: libraryNS},
+				&corev1.ConfigMap{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a ConfigMap rendered from that definition: %v", err)
+		})
+
+		It("is reported by the library itself where the API server lets its status be written", func() {
+			libraries := &PgpilotMetricLibraryReconciler{Client: c, Scheme: scheme.Scheme}
+			_, err := libraries.Reconcile(context.TODO(), ctrl.Request{NamespacedName: libraryKey})
+			var library pgpilotv1.PgpilotMetricLibrary
+			Expect(c.Get(context.TODO(), libraryKey, &library)).To(Succeed())
+			valid := conditionOf(library.Status.Conditions, "Valid")
+			if !ratchetsStatus {
+				// Before Kubernetes 1.33 no status can be written to an
+				// object that breaks a rule: the library keeps what the
+				// earlier release said of it, and the monitor's is where
+				// to look.
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(),
+					"this Kubernetes version is expected to refuse the status of the library, got: %v", err)
+				Expect(valid.Status).To(Equal(metav1.ConditionTrue))
+				Expect(valid.Message).To(Equal("Library contains metric definitions"))
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(valid.Status).To(Equal(metav1.ConditionFalse))
+			Expect(valid.Reason).To(Equal("InvalidMetric"))
+			Expect(valid.Message).To(ContainSubstring(`metric "queue_depth": sqls key "*"`))
+			Expect(library.Status.MetricCount).To(BeEquivalentTo(1))
+		})
+
+		// A monitor whose own definitions break a rule is itself an object
+		// the API server refuses the status of, before Kubernetes 1.33. It
+		// keeps saying what the earlier release left there.
+		It("is named for a monitor's own definitions, by an event where the status cannot be written", func() {
+			recorder := reconciler.Recorder.(*record.FakeRecorder)
+			for name, problem := range map[string]string{
+				"inline-old-rules": `metric "queue_depth": sqls key "*" is not a PostgreSQL major version`,
+				"inline-duplicate": `metric "twice" is defined more than once`,
+			} {
+				key := types.NamespacedName{Name: name, Namespace: libraryNS}
+				drain(recorder)
+				_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{NamespacedName: key})
+				Expect(drain(recorder)).To(
+					ConsistOf(HavePrefix("Warning InvalidMetric spec.metrics.custom cannot be used: "+problem)), name)
+				err2 := c.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-" + name + "-config", Namespace: libraryNS},
+					&corev1.ConfigMap{})
+				Expect(apierrors.IsNotFound(err2)).To(BeTrue(), "%s: a ConfigMap rendered from that definition: %v", name, err2)
+
+				var monitor pgpilotv1.PgpilotMonitor
+				Expect(c.Get(context.TODO(), key, &monitor)).To(Succeed())
+				ready := conditionOf(monitor.Status.Conditions, "Ready")
+				if !ratchetsStatus {
+					Expect(apierrors.IsInvalid(err)).To(BeTrue(),
+						"%s: this Kubernetes version is expected to refuse the status of the monitor, got: %v", name, err)
+					Expect(ready.Reason).To(Equal("PodRunning"), name)
+					Expect(monitor.Status.Ready).To(BeTrue(), name)
+					continue
+				}
+				Expect(err).NotTo(HaveOccurred(), name)
+				Expect(ready.Status).To(Equal(metav1.ConditionFalse), name)
+				Expect(ready.Reason).To(Equal("InvalidMetric"), name)
+				Expect(ready.Message).To(ContainSubstring(problem), name)
+				Expect(monitor.Status.Ready).To(BeFalse(), name)
+			}
+		})
+
+		// Correcting what breaks the rule is accepted by every API server.
+		It("is used again once it is corrected", func() {
+			library := libraryOf(libraryNS, "old-rules", nil)
+			Expect(c.Get(context.TODO(), libraryKey, library)).To(Succeed())
+			Expect(unstructured.SetNestedSlice(library.Object, []any{map[string]any{
+				"name": "queue_depth", "sqls": map[string]any{"14": "SELECT 1 AS depth", "0": "SELECT 0 AS depth"},
+			}}, "spec", "metrics")).To(Succeed())
+			Expect(c.Update(context.TODO(), library)).To(Succeed())
+
+			_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{NamespacedName: monitorKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var monitor pgpilotv1.PgpilotMonitor
+			Expect(c.Get(context.TODO(), monitorKey, &monitor)).To(Succeed())
+			Expect(conditionOf(monitor.Status.Conditions, "ConfigGenerated").Status).To(Equal(metav1.ConditionTrue))
+			Expect(conditionOf(monitor.Status.Conditions, "Ready").Reason).NotTo(Equal("InvalidMetric"))
+			var config corev1.ConfigMap
+			Expect(c.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-uses-old-rules-config", Namespace: libraryNS},
+				&config)).To(Succeed())
+			Expect(config.Data["metrics.yaml"]).To(ContainSubstring("queue_depth"))
+		})
 	})
 
 	// The monitor that named no image has one in its stored spec all the

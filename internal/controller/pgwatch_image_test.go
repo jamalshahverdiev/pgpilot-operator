@@ -1164,6 +1164,11 @@ func TestStoredImageMigration_RecordsAnEventPerMigratedMonitor(t *testing.T) {
 		!strings.HasSuffix(events[0], "cybertecpostgresql/pgwatch:"+builder.PgwatchVersion) {
 		t.Errorf("events: %q", events)
 	}
+	// The tag is gone from the spec; whether and when the collector follows
+	// is up to the monitor's next reconcile, which may apply nothing.
+	if !strings.Contains(events[0], "at the monitor's next successful reconcile") {
+		t.Errorf("the event says more than was done: %q", events[0])
+	}
 }
 
 func TestStoredImageMigration_StartRetriesAndNeverFailsTheManager(t *testing.T) {

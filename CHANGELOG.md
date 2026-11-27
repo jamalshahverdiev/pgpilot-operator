@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### Metric definitions stored before the validation rules
+
+- The rules this release adds for metric definitions (`sqls` keys that are
+  plain major versions, no empty statements, `masterOnly` or `standbyOnly`
+  but not both, unique names) are applied by the API server when an object is
+  written. A definition stored earlier still reached the operator, which
+  made what it could of it without a word: a key such as `"*"` was dropped,
+  and a metric left without any statement was handed to the collector with
+  none. The operator now checks stored definitions by the same rules. A
+  monitor that uses one that breaks a rule, from a library or inline, reports
+  `InvalidMetric` and names the library, the metric and what is wrong with
+  it.
+- `PgpilotMetricLibrary`: the `Valid` condition says whether every definition
+  can be used (`False` / `InvalidMetric` names the ones that cannot). It used
+  to be true for every library that had at least one entry. The status is
+  written only when it changes, and no longer with a full update of the
+  object.
+
+Upgrade notes:
+
+- Before upgrading, on every Kubernetes version, run the command further
+  down under "Upgrade notes" (`kubectl get pgpilotmonitors,pgpilotmetriclibraries
+  ... | jq`) and correct what it prints. Correcting a definition is accepted
+  by every Kubernetes version, before and after the upgrade.
+- A monitor that uses a definition breaking one of the rules becomes
+  `Ready=False` with reason `InvalidMetric` when the operator is upgraded.
+  Its collector keeps running with the configuration it has, and nothing is
+  changed for the monitor until the definition is corrected: no rotated
+  Secret, no change of the spec and no new pgwatch release reach it. One
+  such metric in a library does that to every monitor that lists the library.
+- This includes definitions that were collected as they were written: a
+  `"*"` key next to a version key (the key was dropped, the rest collected),
+  `"014"` or `"+14"` (read as 14), two metrics of one name in one list (the
+  last one was used) and `masterOnly` with `standbyOnly` (collected on
+  primaries). A metric of the same name in a library and in the monitor, or
+  in two libraries, is still the documented way to override one.
+- Kubernetes before 1.33 does not let the operator write the status of an
+  object that itself breaks a rule. A monitor whose own
+  `spec.metrics.custom` holds the definition therefore keeps the status it
+  had, and `READY` can go on saying `true` while nothing is done for it. The
+  operator records a `Warning` event with reason `InvalidMetric` on the
+  monitor at every attempt and logs `update status ... is invalid`. A library
+  that breaks a rule likewise keeps the `Valid=True` an earlier release
+  wrote; the monitors that use it report `InvalidMetric` as on every version.
+- The `ImageDefaultRestored` event no longer says that the collector "now
+  runs" the operator's default image: the tag is removed from the spec when
+  the operator starts, and the collector follows at the monitor's next
+  successful reconcile.
+
 ### Monitors that can always be deleted, and names that are not taken over
 
 - The operator no longer puts a finalizer on PgpilotMonitors. The finalizer
@@ -347,29 +396,49 @@ Upgrade notes:
   | Kubernetes | Editing other fields, labels | Deleting | Status written by the operator |
   |------------|------------------------------|----------|--------------------------------|
   | 1.33+      | works                        | works    | works                          |
-  | 1.30–1.32  | works                        | works    | refused until the object is fixed: READY, conditions and `metricCount` stop updating and the operator logs `update status ... is invalid`. The pgwatch pod keeps running. |
+  | 1.30–1.32  | works                        | works    | refused until the object is fixed: READY, conditions and `metricCount` stop updating and the operator logs `update status ... is invalid`. The pgwatch pod keeps running; where the rule is one about metric definitions it is no longer brought up to date (`InvalidMetric`, see above), and a `Warning` event on the monitor says so. |
   | 1.28, 1.29 | refused                      | hangs in `Terminating` | refused |
 
   In every case the way out is to correct the offending field, which is always
   accepted - also while the object is `Terminating`. A list that exceeds a new
   size limit has to be shortened before any entry of it can be edited.
-- Before upgrading the CRDs on Kubernetes older than 1.33, look for objects
-  that will be affected. The usual ones are the `"*"` key in `sqls` and a
-  monitor without an enabled sink:
+- Before upgrading, on any Kubernetes version, look for objects that will be
+  affected. The usual ones are the `"*"` key in `sqls` and a monitor without
+  an enabled sink. The command prints the monitors and libraries with a
+  metric definition that breaks a rule (a `sqls` key that is no plain major
+  version, an empty or missing statement, both roles, a name that is no
+  lower-case identifier or is used twice in one list), the monitors that use
+  such a library, and the monitors without a sink:
 
   ```bash
   kubectl get pgpilotmonitors,pgpilotmetriclibraries -A -o json | jq -r '
-    .items[] | . as $o
-    | (if $o.kind == "PgpilotMonitor" then ($o.spec.metrics.custom // []) else ($o.spec.metrics // []) end) as $metrics
+    def metrics: if .kind == "PgpilotMonitor" then (.spec.metrics.custom // []) else (.spec.metrics // []) end;
+    def broken: metrics as $m
+      | ($m | any((.sqls // {}) | keys | any(test("\\A(0|[1-9][0-9]{0,2})\\z") | not)))
+        or ($m | any((.sqls // {}) | (length == 0 or any(. == ""))))
+        or ($m | any(.masterOnly == true and .standbyOnly == true))
+        or ($m | any((.name // "") | test("\\A[a-z_][a-z0-9_]{0,62}\\z") | not))
+        or (($m | map(.name) | unique | length) != ($m | length));
+    [.items[] | select(.kind == "PgpilotMetricLibrary" and broken)
+      | "\(.metadata.namespace)/\(.metadata.name)"] as $libraries
+    | .items[] | . as $o
     | select(
-        ($metrics | any((.sqls // {}) | keys | any(test("^(0|[1-9][0-9]{0,2})$") | not)))
-        or ($metrics | any(.masterOnly == true and .standbyOnly == true))
-        or ($o.kind == "PgpilotMonitor"
-            and $o.spec.sinks.prometheus.enabled == false
-            and $o.spec.sinks.grpc.enabled != true)
+        broken
+        or (.kind == "PgpilotMonitor"
+            and any(.spec.metrics.fromLibraries[]?; "\($o.metadata.namespace)/\(.name)" | IN($libraries[])))
+        or (.kind == "PgpilotMonitor"
+            and .spec.sinks.prometheus.enabled == false
+            and .spec.sinks.grpc.enabled != true)
       )
     | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
   ```
+
+  It does not look at `interval`: a value below `1s`, which releases up to
+  v1.0.1 accepted and collected every 60 seconds, is refused as well. On
+  Kubernetes 1.33 and later the API server tolerates what the command prints;
+  the operator does not use a metric definition that breaks a rule on any
+  version (`InvalidMetric`, see "Metric definitions stored before the
+  validation rules" above).
 
 ### Credentials
 
