@@ -71,6 +71,21 @@ migrations:
   # leave every stored tag as it is.
   storedImageTag: true
 
+collector:
+  # The user the pgwatch container of every collector runs as. The pgwatch
+  # image names none, which means root, and the pods refuse to run as root.
+  #   ""  or "auto"  65534 ("nobody"), except on OpenShift, which the operator
+  #                  recognises by the security.openshift.io API group: there
+  #                  no user is named, and the cluster assigns one from the
+  #                  range of the namespace (restricted-v2 refuses any other).
+  #                  In default, kube-system, kube-public, openshift,
+  #                  openshift-infra and openshift-node OpenShift assigns
+  #                  none, and the collectors there keep 65534
+  #   "none"         name no user, wherever the operator runs
+  #   a user ID      that user in every namespace, e.g. "1001"; 1 to 2147483647
+  # A change replaces the collector pods whose user it changes.
+  runAsUser: ""
+
 credentials:
   # How often the Secret referenced by a PgpilotMonitor is read again. The
   # operator does not watch Secrets; a changed Secret is noticed at the next

@@ -266,6 +266,7 @@ func startCollector(
 	monitor *pgpilotv1.PgpilotMonitor,
 	libraries []pgpilotv1.PgpilotMetricLibrary,
 	creds secrets,
+	options ...builder.PodOption,
 ) *collector {
 	t.Helper()
 
@@ -274,7 +275,7 @@ func startCollector(
 	if err != nil {
 		t.Fatalf("BuildConfigMap: %v", err)
 	}
-	deployment := builder.BuildDeployment(monitor, merged, builder.PodTemplateVersions{Config: hash})
+	deployment := builder.BuildDeployment(monitor, merged, builder.PodTemplateVersions{Config: hash}, options...)
 	pod := deployment.Spec.Template.Spec
 	if len(pod.Containers) != 1 || len(pod.InitContainers) != 0 {
 		t.Fatalf("the test knows a pod with one container, got %d and %d init containers",
@@ -325,21 +326,30 @@ func startCollector(
 	return c
 }
 
+// assignedByThePlatform is a user as OpenShift assigns one to a pod that
+// names none: a number from the range of the namespace, far from every user
+// the image knows, in the group root.
+const assignedByThePlatform = "1000680000:0"
+
 // securityFlags translates the security settings of the pod. The kubelet
 // refuses to start a container as root when the pod demands a non-root user
-// and the image names none, so the numeric user is required here.
+// and the image names none. A pod that names no user either is one for a
+// platform that assigns it, and the test plays that platform.
 func securityFlags(t *testing.T, pod corev1.PodSpec, container corev1.Container) []string {
 	t.Helper()
 	if pod.SecurityContext == nil || pod.SecurityContext.RunAsNonRoot == nil || !*pod.SecurityContext.RunAsNonRoot {
 		t.Errorf("the pod does not demand a non-root user")
 	}
 	sc := container.SecurityContext
-	if sc == nil || sc.RunAsUser == nil {
-		t.Fatalf("the container has no numeric user: with runAsNonRoot the kubelet could not verify the image's")
+	if sc == nil {
+		t.Fatalf("the container has no security context")
 	}
-	user := strconv.FormatInt(*sc.RunAsUser, 10)
-	if sc.RunAsGroup != nil {
-		user += ":" + strconv.FormatInt(*sc.RunAsGroup, 10)
+	user := assignedByThePlatform
+	if sc.RunAsUser != nil {
+		user = strconv.FormatInt(*sc.RunAsUser, 10)
+		if sc.RunAsGroup != nil {
+			user += ":" + strconv.FormatInt(*sc.RunAsGroup, 10)
+		}
 	}
 	flags := []string{"--user", user}
 	if sc.ReadOnlyRootFilesystem != nil && *sc.ReadOnlyRootFilesystem {
@@ -365,10 +375,19 @@ func envFlags(t *testing.T, container corev1.Container, creds secrets) []string 
 	t.Helper()
 	flags := make([]string, 0, 2*len(container.Env))
 	for _, env := range container.Env {
+		// A variable of spec.env with a value of its own. The kubelet
+		// expands $(NAME) in it, which this test cannot imitate.
+		if env.ValueFrom == nil && env.Name != "PGUSER" && env.Name != "PGPASSWORD" {
+			if strings.Contains(env.Value, "$(") {
+				t.Fatalf("env %s refers to another variable; teach the test to expand it", env.Name)
+			}
+			flags = append(flags, "--env", env.Name+"="+env.Value)
+			continue
+		}
 		// The pod template is read by many who may not read Secrets: the
-		// builder puts no value into it, and one that appears there is a
-		// credential in the open (and would be rewritten by the kubelet,
-		// which this test cannot imitate).
+		// builder puts no credential into it, and one that appears there
+		// is a credential in the open (and would be rewritten by the
+		// kubelet).
 		if env.Value != "" || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
 			t.Fatalf("env %s is not a reference to a Secret: %+v", env.Name, env)
 		}

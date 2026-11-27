@@ -22,7 +22,7 @@ error):
 | `CrashLoopBackOff` | pgwatch keeps starting and exiting. See its last words with `kubectl logs -l pgpilot.io/monitor=<name> --previous` |
 | `CreateContainerConfigError`, `CreateContainerError`, `RunContainerError` | The kubelet cannot start the container; the message says why |
 | `Unschedulable` | No node can take the pod: requests too large, taints, node selectors |
-| `PodCreateFailed` | No pod could be created at all: a ResourceQuota, a LimitRange, Pod Security admission. The message is the API server's |
+| `PodCreateFailed` | No pod could be created at all: a ResourceQuota, a LimitRange, Pod Security admission, a ServiceAccount or PriorityClass that does not exist, a security context constraint on OpenShift (see [OpenShift](#openshift)). The message is the API server's |
 | `RolloutStuck` | The rollout made no progress for ten minutes and nothing more specific is known. Look at `kubectl describe deploy,rs,pod -l pgpilot.io/monitor=<name>` |
 | `SecretNotFound`, `SecretKeyMissing`, `SecretReadFailed`, `NoCredentials` | Credentials or certificates, see below. The message names the Secret; for a certificate also the field of the monitor that names it |
 | `InvalidCertificate` | A Secret named under `spec.database.tls` or `spec.sinks.grpc.tls` has its keys, and they do not hold what the collector can load, see below |
@@ -596,6 +596,51 @@ A related problem that shows in the log but does not crash the pod:
 ```sql
 GRANT pg_monitor TO pgwatch;
 ```
+
+## OpenShift
+
+The collector pod has to run as some user that is not root, and the pgwatch
+image names none. Elsewhere the operator names 65534. OpenShift's default
+security context constraint, `restricted-v2`, assigns a user from the range
+of the namespace and refuses a pod that asks for another:
+
+```text
+PodCreateFailed: ... unable to validate against any security context constraint:
+... runAsUser: Invalid value: 65534: must be in the ranges: [1000680000, 1000689999]
+```
+
+The operator therefore names no user on OpenShift, which it recognises when
+it starts by the API group `security.openshift.io`, and its log says what it
+decided (`user of the collector containers`). If it decided wrongly, say it
+yourself: `collector.runAsUser` in the chart, or `--collector-run-as-user`:
+
+- `none`: name no user, in any namespace;
+- a user ID (1 to 2147483647): every collector runs as that user. On
+  OpenShift that needs the constraint `nonroot-v2`, or one of your own that
+  allows the user and the `runtime/default` seccomp profile, granted to the
+  ServiceAccount of the collector (`default`, or `spec.serviceAccountName`).
+  `anyuid` does not do: it allows no seccomp profile, and the collector pod
+  sets one (`seccomp may not be set`);
+- `auto`: the default.
+
+A pod that names no user and is assigned none does not start:
+`CreateContainerConfigError`, "container has runAsNonRoot and image will run
+as root". That happens
+
+- with `none` on a cluster that is not OpenShift;
+- in the namespaces OpenShift does not check pods in. `default`,
+  `kube-system`, `kube-public`, `openshift`, `openshift-infra` and
+  `openshift-node` are known to the operator, and under `auto` a collector
+  there keeps 65534. A namespace that was exempted with the label
+  `openshift.io/run-level` is not known to it: name a user ID, or keep
+  monitors out of it;
+- under a constraint of your own that lets any user in and ranks before
+  `restricted-v2`: it assigns none;
+- on a cluster that serves `security.openshift.io` without enforcing it,
+  because the group was installed for another reason: set
+  `collector.runAsUser: "65534"`.
+
+A change of the setting replaces every collector pod it changes the user of.
 
 ## Operator pod not starting
 

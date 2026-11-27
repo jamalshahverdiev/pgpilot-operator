@@ -849,6 +849,197 @@ var _ = Describe("CRD validation rules", func() {
 	})
 
 	// ------------------------------------------------------------------
+	// ------------------------------------------------------------------
+	// Where the collector pod runs and what it is given. The fields of a
+	// pod are passed on as they are, and what only a pod is refused for is
+	// reported when the collector is rolled out; what the monitor itself
+	// can be held to is refused here.
+	Describe("the collector pod", func() {
+		It("accepts scheduling, a ServiceAccount, pull secrets and environment variables", func() {
+			got := stored(monitor("placed",
+				set(map[string]any{
+					"nodeSelector": map[string]any{"pool": "monitoring", "node.kubernetes.io/instance-type": "", "disk": "ssd"},
+					"tolerations": []any{
+						map[string]any{"key": "dedicated", "operator": "Equal", "value": "monitoring", "effect": "NoSchedule"},
+						map[string]any{"operator": "Exists"},
+					},
+					"affinity": map[string]any{"nodeAffinity": map[string]any{
+						"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{"nodeSelectorTerms": []any{
+							map[string]any{"matchExpressions": []any{map[string]any{
+								"key": "topology.kubernetes.io/zone", "operator": "In", "values": []any{"a", "b"},
+							}}},
+						}},
+					}},
+					"topologySpreadConstraints": []any{map[string]any{
+						"maxSkew": int64(1), "topologyKey": "topology.kubernetes.io/zone", "whenUnsatisfiable": "ScheduleAnyway",
+						"labelSelector": map[string]any{"matchLabels": map[string]any{"app.kubernetes.io/managed-by": "pgpilot-operator"}},
+					}},
+					"priorityClassName": "monitoring",
+				}, "scheduling"),
+				set("collector", "serviceAccountName"),
+				set([]any{map[string]any{"name": "registry-a"}, map[string]any{"name": "registry.b"}}, "image", "pullSecrets"),
+				set([]any{
+					map[string]any{"name": "PGAPPNAME", "value": "pgwatch"},
+					map[string]any{"name": "https_proxy", "value": ""},
+					map[string]any{"name": "_UNDERSCORE1", "valueFrom": map[string]any{
+						"secretKeyRef": map[string]any{"name": "proxy", "key": "url"},
+					}},
+					map[string]any{"name": "PW_MIN_DB_SIZE_MB", "value": "8"},
+					// Not the operator's: only the names are, not what begins like them.
+					map[string]any{"name": "PGUSERNAME", "value": "x"},
+					map[string]any{"name": "PW_SINKS", "value": "x"},
+					map[string]any{"name": "pguser", "value": "x"},
+				}, "env"),
+			))
+			spec, _, _ := unstructured.NestedMap(got.Object, "spec")
+			Expect(spec).To(HaveKey("scheduling"))
+			Expect(spec["serviceAccountName"]).To(Equal("collector"))
+			// A pull secret brings an image block, and with it the default
+			// pull policy, which is what a monitor without one gets as well.
+			policy, _, _ := unstructured.NestedString(got.Object, "spec", "image", "pullPolicy")
+			Expect(policy).To(Equal("IfNotPresent"))
+		})
+
+		It("accepts the blocks empty", func() {
+			expectAccepted(monitor("empty-blocks",
+				set(map[string]any{}, "scheduling"), set("", "serviceAccountName"), set([]any{}, "env"),
+				set([]any{}, "image", "pullSecrets"), set("", "scheduling", "priorityClassName")))
+		})
+
+		DescribeTable("rejects what could not be the name of the object it names",
+			func(value any, at string, path ...string) {
+				expectRejected(monitor("unusable", set(value, path...)), at)
+			},
+			Entry("a ServiceAccount of another namespace", "other/collector", "spec.serviceAccountName", "serviceAccountName"),
+			Entry("a ServiceAccount in upper case", "Collector", "spec.serviceAccountName", "serviceAccountName"),
+			Entry("a ServiceAccount name of 254 characters", strings.Repeat("a", 254), "spec.serviceAccountName", "serviceAccountName"),
+			Entry("a priority class in upper case", "High", "spec.scheduling.priorityClassName", "scheduling", "priorityClassName"),
+			Entry("a priority class of 254 characters", strings.Repeat("a", 254), "spec.scheduling.priorityClassName",
+				"scheduling", "priorityClassName"),
+			Entry("a pull secret of another namespace", []any{map[string]any{"name": "other/registry"}},
+				"spec.image.pullSecrets[0].name", "image", "pullSecrets"),
+			Entry("a pull secret without a name", []any{map[string]any{}}, "spec.image.pullSecrets[0].name", "image", "pullSecrets"),
+			Entry("a pull secret with an empty name", []any{map[string]any{"name": ""}},
+				"spec.image.pullSecrets[0].name", "image", "pullSecrets"),
+			Entry("a pull secret name of 254 characters", []any{map[string]any{"name": strings.Repeat("a", 254)}},
+				"spec.image.pullSecrets[0].name", "image", "pullSecrets"),
+			Entry("a node selector value that is no label value", map[string]any{"pool": "not a label!"},
+				"spec.scheduling.nodeSelector", "scheduling", "nodeSelector"),
+			Entry("a node selector value of 64 characters", map[string]any{"pool": strings.Repeat("a", 64)},
+				"spec.scheduling.nodeSelector", "scheduling", "nodeSelector"),
+		)
+
+		It("limits how much of each there can be", func() {
+			many := func(n int, item func(i int) any) []any {
+				out := make([]any, 0, n)
+				for i := range n {
+					out = append(out, item(i))
+				}
+				return out
+			}
+			secret := func(i int) any { return map[string]any{"name": "registry-" + strconv.Itoa(i)} }
+			toleration := func(i int) any { return map[string]any{"key": "k" + strconv.Itoa(i), "operator": "Exists"} }
+			spread := func(i int) any {
+				return map[string]any{"maxSkew": int64(1), "topologyKey": "k" + strconv.Itoa(i), "whenUnsatisfiable": "ScheduleAnyway"}
+			}
+			env := func(i int) any { return map[string]any{"name": "VAR_" + strconv.Itoa(i), "value": "x"} }
+
+			expectAccepted(monitor("most", set(many(8, secret), "image", "pullSecrets"),
+				set(many(32, toleration), "scheduling", "tolerations"),
+				set(many(8, spread), "scheduling", "topologySpreadConstraints"),
+				set(stringMap(32), "scheduling", "nodeSelector"),
+				set(many(64, env), "env")))
+			expectRejected(monitor("too-many", set(many(9, secret), "image", "pullSecrets")), "spec.image.pullSecrets")
+			expectRejected(monitor("too-many", set(many(33, toleration), "scheduling", "tolerations")), "spec.scheduling.tolerations")
+			expectRejected(monitor("too-many", set(many(9, spread), "scheduling", "topologySpreadConstraints")),
+				"spec.scheduling.topologySpreadConstraints")
+			expectRejected(monitor("too-many", set(stringMap(33), "scheduling", "nodeSelector")), "spec.scheduling.nodeSelector")
+			expectRejected(monitor("too-many", set(many(65, env), "env")), "spec.env")
+		})
+
+		It("accepts names as long and as dotted as an object can have", func() {
+			long := strings.Repeat("a", 253)
+			expectAccepted(monitor("longest-names",
+				set(long, "serviceAccountName"), set(long, "scheduling", "priorityClassName"),
+				set([]any{map[string]any{"name": long}, map[string]any{"name": "registry.example.com-pull"}}, "image", "pullSecrets")))
+			expectAccepted(monitor("dotted-names",
+				set("team.collector-1", "serviceAccountName"), set("system-cluster-critical", "scheduling", "priorityClassName")))
+		})
+
+		// A pod has one constraint for each topology key and each way of
+		// dealing with what cannot be satisfied. Two for the same pair
+		// are refused here; passed on, the API server would not say that
+		// the Deployment is invalid but fail on it, again and again.
+		It("takes one spread constraint for each topology key and whenUnsatisfiable", func() {
+			constraint := func(key, when string, skew int64) any {
+				return map[string]any{"maxSkew": skew, "topologyKey": key, "whenUnsatisfiable": when}
+			}
+			expectRejected(monitor("twice", set([]any{
+				constraint("topology.kubernetes.io/zone", "ScheduleAnyway", 1),
+				constraint("topology.kubernetes.io/zone", "ScheduleAnyway", 2),
+			}, "scheduling", "topologySpreadConstraints")), "spec.scheduling.topologySpreadConstraints[1]", "Duplicate value")
+			expectAccepted(monitor("each-once", set([]any{
+				constraint("topology.kubernetes.io/zone", "ScheduleAnyway", 1),
+				constraint("topology.kubernetes.io/zone", "DoNotSchedule", 2),
+				constraint("kubernetes.io/hostname", "ScheduleAnyway", 1),
+			}, "scheduling", "topologySpreadConstraints")))
+		})
+
+		It("lists a pull secret once", func() {
+			expectRejected(monitor("twice",
+				set([]any{map[string]any{"name": "registry"}, map[string]any{"name": "registry"}}, "image", "pullSecrets")),
+				"spec.image.pullSecrets[1]", "Duplicate value")
+		})
+
+		// The operator passes these to pgwatch itself: the credentials, and
+		// where the collector finds its configuration and sends what it
+		// collects. One of them given here would be ignored, or worse, used.
+		DescribeTable("keeps what the operator sets out of env",
+			func(name string) {
+				expectRejected(monitor("reserved", set([]any{
+					map[string]any{"name": "PGAPPNAME", "value": "pgwatch"}, map[string]any{"name": name, "value": "x"},
+				}, "env")), "PGUSER, PGPASSWORD, PW_SOURCES, PW_METRICS, PW_SINK and PW_WEBDISABLE are set by the operator")
+				expectRejected(monitor("reserved", set([]any{map[string]any{
+					"name": name, "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "other", "key": "k"}},
+				}}, "env")), "are set by the operator")
+			},
+			Entry("PGUSER", "PGUSER"), Entry("PGPASSWORD", "PGPASSWORD"), Entry("PW_SOURCES", "PW_SOURCES"),
+			Entry("PW_METRICS", "PW_METRICS"), Entry("PW_SINK", "PW_SINK"), Entry("PW_WEBDISABLE", "PW_WEBDISABLE"),
+		)
+
+		DescribeTable("rejects an environment variable that could not be one",
+			func(variable map[string]any, fragment string) {
+				expectRejected(monitor("unusable", set([]any{variable}, "env")), fragment)
+			},
+			Entry("no name", map[string]any{"value": "x"}, "spec.env[0].name"),
+			Entry("an empty name", map[string]any{"name": "", "value": "x"}, "spec.env[0].name"),
+			Entry("a name that starts with a digit", map[string]any{"name": "1ST", "value": "x"}, "spec.env[0].name"),
+			Entry("a name with an equals sign", map[string]any{"name": "A=B", "value": "x"}, "spec.env[0].name"),
+			Entry("a name with a space", map[string]any{"name": "MY VAR", "value": "x"}, "spec.env[0].name"),
+			Entry("a name with a dash", map[string]any{"name": "MY-VAR", "value": "x"}, "spec.env[0].name"),
+			Entry("a name of 129 characters", map[string]any{"name": strings.Repeat("A", 129), "value": "x"}, "spec.env[0].name"),
+			Entry("a value of 4097 characters", map[string]any{"name": "A", "value": strings.Repeat("x", 4097)}, "spec.env[0].value"),
+			Entry("a value and a source for it", map[string]any{
+				"name": "A", "value": "x", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "s", "key": "k"}},
+			}, "set value or valueFrom, not both"),
+		)
+
+		It("accepts the longest name and value, and an empty value next to a source", func() {
+			expectAccepted(monitor("longest", set([]any{
+				map[string]any{"name": strings.Repeat("A", 128), "value": strings.Repeat("x", 4096)},
+				map[string]any{"name": "B", "value": "", "valueFrom": map[string]any{
+					"configMapKeyRef": map[string]any{"name": "settings", "key": "b"},
+				}},
+			}, "env")))
+		})
+
+		It("names a variable once", func() {
+			expectRejected(monitor("twice", set([]any{
+				map[string]any{"name": "PGAPPNAME", "value": "a"}, map[string]any{"name": "PGAPPNAME", "value": "b"},
+			}, "env")), "spec.env[1]", "Duplicate value")
+		})
+	})
+
 	Describe("status", func() {
 		// With omitempty a false value was never written, so the READY
 		// column was blank for exactly the monitors that needed attention.

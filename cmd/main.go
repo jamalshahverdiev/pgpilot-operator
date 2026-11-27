@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -57,6 +58,34 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// commandLine is what the flags say that the controllers go by.
+type commandLine struct {
+	credentialsRecheck    time.Duration
+	migrateStoredImageTag bool
+	collectorRunAsUser    string
+}
+
+// controllerOptionsFor turns the command line, and what the cluster says
+// about itself, into the settings of the controllers. It is the one place
+// they are put together, and what it returns is what main hands on: a flag
+// that is read here and left out of the result is found by the tests of this
+// function.
+func controllerOptionsFor(
+	flags commandLine, serviceMonitorEnabled bool, dc discovery.DiscoveryInterface,
+) (controller.Options, error) {
+	collectorUser, err := controller.ResolveCollectorUser(flags.collectorRunAsUser, dc)
+	if err != nil {
+		return controller.Options{}, fmt.Errorf("decide which user the collectors run as: %w", err)
+	}
+	options := controller.Options{
+		ServiceMonitorEnabled: serviceMonitorEnabled,
+		CredentialsRecheck:    flags.credentialsRecheck,
+		KeepStoredImageTag:    !flags.migrateStoredImageTag,
+		CollectorRunAsUser:    collectorUser,
+	}
+	return options, options.Validate()
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -69,6 +98,7 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	var credentialsRecheck time.Duration
 	var migrateStoredImageTag bool
+	var collectorRunAsUser string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -88,6 +118,10 @@ func main() {
 		"How often a credentials Secret referenced by a PgpilotMonitor is read again. "+
 			"A changed Secret rolls the collector pod, so this bounds how long a rotated password goes unnoticed. "+
 			"At least 10s; 0 means the default of 5m.")
+	flag.StringVar(&collectorRunAsUser, "collector-run-as-user", controller.CollectorUserAuto,
+		"The user the pgwatch container of every collector runs as: a user ID, \"none\" to name no user and "+
+			"leave it to the platform (OpenShift assigns one from the range of the namespace), or \"auto\" "+
+			"for 65534, except on OpenShift, where no user is named but in the namespaces OpenShift assigns none in.")
 	flag.BoolVar(&migrateStoredImageTag, "migrate-stored-image-tag", true,
 		"Remove, once at start, the pgwatch image tag that operator releases up to v1.0.2 wrote into the spec "+
 			"of the monitors they reconciled, so that those monitors run the pgwatch release of this operator. "+
@@ -194,15 +228,17 @@ func main() {
 			"restart the operator after installing the prometheus-operator to change that")
 	}
 
-	controllerOptions := controller.Options{
-		ServiceMonitorEnabled: serviceMonitorEnabled,
-		CredentialsRecheck:    credentialsRecheck,
-		KeepStoredImageTag:    !migrateStoredImageTag,
-	}
-	if err := controllerOptions.Validate(); err != nil {
+	controllerOptions, err := controllerOptionsFor(commandLine{
+		credentialsRecheck:    credentialsRecheck,
+		migrateStoredImageTag: migrateStoredImageTag,
+		collectorRunAsUser:    collectorRunAsUser,
+	}, serviceMonitorEnabled, dc)
+	if err != nil {
 		setupLog.Error(err, "invalid command line")
 		os.Exit(1)
 	}
+	setupLog.Info("user of the collector containers",
+		"runAsUser", controllerOptions.CollectorRunAsUser.String(), "collector-run-as-user", collectorRunAsUser)
 
 	mgr, err := ctrl.NewManager(restConfig, controller.ManagerOptions(ctrl.Options{
 		Scheme:                 scheme,

@@ -302,3 +302,36 @@ func TestStoredImageMigration_IsBuiltFromTheManagerUnlessTurnedOff(t *testing.T)
 		t.Error("KeepStoredImageTag must turn the migration off")
 	}
 }
+
+// What the command line says has to reach the reconciler: an option that is
+// parsed, validated and then left behind changes nothing.
+func TestOptions_ReachTheMonitorReconciler(t *testing.T) {
+	user, err := ParseCollectorRunAsUser("none", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		ServiceMonitorEnabled: true,
+		CredentialsRecheck:    7 * time.Minute,
+		CredentialsRetry:      11 * time.Second,
+		CollectorRunAsUser:    user,
+	}
+	r := opts.monitorReconciler()
+	if !r.ServiceMonitorEnabled || r.CredentialsRecheck != 7*time.Minute || r.CredentialsRetry != 11*time.Second {
+		t.Errorf("reconciler %+v", r)
+	}
+	if r.CollectorRunAsUser.RunAsUserIn("team") != nil {
+		t.Errorf("the collector user of the options is %v, that of the reconciler %v", user, r.CollectorRunAsUser)
+	}
+	// Every setting of Options is one of the reconciler or of something
+	// else that is set up from it: a new one has to be handed on here, or
+	// listed as not the reconciler's.
+	notTheReconcilers := map[string]bool{"KeepStoredImageTag": true}
+	fields := reflect.TypeOf(opts)
+	for field := range fields.Fields() {
+		name := field.Name
+		if _, has := reflect.TypeOf(r).Elem().FieldByName(name); !has && !notTheReconcilers[name] {
+			t.Errorf("Options.%s is not a field of the reconciler: hand it on in monitorReconciler", name)
+		}
+	}
+}

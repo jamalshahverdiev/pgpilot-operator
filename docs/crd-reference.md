@@ -170,6 +170,7 @@ statements the preset reports on; watch it before settling on a limit.
 | `repository` | string | no | `cybertecpostgresql/pgwatch` | pgwatch image repository |
 | `tag` | string | no | `6.2.0` | Image tag. Leave unset to run the pgwatch release the operator is built for |
 | `pullPolicy` | enum | no | `IfNotPresent` | `Always`, `IfNotPresent`, `Never`. Set on the pgwatch container as it is; the default also holds for the tag `latest`, which Kubernetes would otherwise pull at every start |
+| `pullSecrets` | []object | no | | Secrets in the monitor's namespace with credentials for the image's registry, each as `- name: <secret>` (type `kubernetes.io/dockerconfigjson`). At most 8, each once. The kubelet reads them; the operator does not, and does not check that they exist: a missing one shows as `ImagePullBackOff` when the image cannot be pulled without it |
 
 The defaults of `repository` and `tag` are applied by the operator when it
 builds the collector pod; they are not written into the object. A monitor that
@@ -181,6 +182,97 @@ is only needed to hold a monitor back. A monitor that only names a preset then
 runs on the metric definitions of that release; one that combines a preset
 with metrics of its own is handed the definitions of the operator's default
 release whatever its tag (see [architecture.md](architecture.md#metricsyaml)).
+
+### spec.scheduling
+
+Where the collector pod may run. The fields are those of a pod and are passed
+on as they are. What only a pod is refused for, a toleration with an operator
+that does not exist for example, is reported when the collector is rolled
+out: `ApplyRejected` with the API server's words, or `PodCreateFailed` for
+what is only found when the pod is made (a priority class that does not
+exist). A pod that no node can take shows as `Unschedulable`.
+
+The fields are those of the Kubernetes version the operator is built with.
+One that the cluster's version does not have yet (`matchLabelKeys` in a pod
+affinity term before 1.29, `valueFrom.fileKeyRef` in `spec.env` before 1.34)
+is accepted in the monitor and refused with the Deployment: `ApplyRejected`,
+"field not declared in schema".
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `nodeSelector` | map[string]string | no | | The pod runs only on nodes with all of these labels. At most 32 entries; values have to be label values |
+| `tolerations` | []Toleration | no | | Taints the pod tolerates. At most 32 |
+| `affinity` | Affinity | no | | Node affinity, pod affinity and pod anti-affinity |
+| `topologySpreadConstraints` | []TopologySpreadConstraint | no | | Spread over zones or nodes. A collector is one pod, so a constraint is of use with a `labelSelector` that takes in the collectors of the other monitors of the namespace as well, such as `app.kubernetes.io/managed-by: pgpilot-operator`; a constraint does not count pods of other namespaces (a pod anti-affinity term with a `namespaceSelector` does). At most 8, and as in a pod one for each pair of `topologyKey` and `whenUnsatisfiable` |
+| `priorityClassName` | string | no | | PriorityClass of the pod |
+
+```yaml
+spec:
+  scheduling:
+    nodeSelector:
+      pool: monitoring
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: monitoring
+        effect: NoSchedule
+```
+
+### spec.serviceAccountName
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `serviceAccountName` | string | no | `default` | ServiceAccount of the collector pod, in the monitor's namespace. The collector never talks to the Kubernetes API, and the kubelet mounts no token of the account into its pod. The account matters for what is bound to it: image pull secrets, a security context constraint on OpenShift, and an identity of a cloud provider. One that does not exist shows as `PodCreateFailed` |
+
+Whoever may write a PgpilotMonitor can run a container, of an image of their
+choosing, as any ServiceAccount of the namespace. That the kubelet mounts no
+token does not take the account's cloud identity away: EKS and Azure
+workload identity add a token of their own to the pod of an account that is
+set up for them, and GKE hands the identity out without one. Give the
+permission to write monitors to those you would let create pods.
+
+### spec.env
+
+Environment variables of the pgwatch container, after `PGUSER` and
+`PGPASSWORD`, which the operator sets. At most 64, each name once.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | yes | | Letters, digits and `_`, not starting with a digit; max 128 chars |
+| `value` | string | no | | The value, max 4096 chars. `$(NAME)` refers to a variable that comes before it, as in any pod |
+| `valueFrom` | EnvVarSource | no | | Take the value from a Secret, a ConfigMap or a field of the pod instead. Not together with `value` |
+
+What they are for, and what not:
+
+- settings of the PostgreSQL driver that the connection string does not
+  carry: `PGOPTIONS` (`-c statement_timeout=30s`), `PGCONNECT_TIMEOUT`,
+  `PGTZ`. What the connection string says wins: `PGHOST`, `PGPORT`,
+  `PGDATABASE` and `PGSSLMODE` change nothing. Neither does `PGAPPNAME`:
+  pgwatch names its sessions itself;
+- settings of pgwatch that have no field of their own, such as
+  `PW_MIN_DB_SIZE_MB` or `PW_INSTANCE_LEVEL_CACHE_MAX_SECONDS`. An option the
+  operator passes on the command line wins over its variable, and the
+  options of the sinks the operator does not use (`PW_BATCHING_DELAY`,
+  `PW_RETENTION`, ...) change nothing;
+- a proxy for the gRPC sink (`HTTPS_PROXY`, `NO_PROXY`).
+
+`PGUSER`, `PGPASSWORD`, `PW_SOURCES`, `PW_METRICS`, `PW_SINK` and
+`PW_WEBDISABLE` are refused: they are the credentials, and where pgwatch
+finds its configuration and sends what it collects, which is the operator's
+to say.
+
+A Secret or ConfigMap that `valueFrom` names is read by the pod once, when it
+starts. The operator does not look at it: one that is missing keeps the pod
+from starting (`CreateContainerConfigError`), and one that changes does not
+replace the pod. A Secret named here is readable by whoever may write the
+monitor, as the credentials Secret is.
+
+```yaml
+spec:
+  env:
+    - name: PGOPTIONS
+      value: "-c statement_timeout=30s"
+```
 
 ### spec.podMetadata / spec.serviceMetadata
 

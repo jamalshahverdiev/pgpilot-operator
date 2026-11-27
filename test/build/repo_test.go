@@ -532,11 +532,14 @@ func TestMain_BuildsTheManagerThroughTheControllerPackage(t *testing.T) {
 	for _, call := range []string{
 		"controller.ManagerOptions(ctrl.Options{",
 		"controller.SetupWithManager(mgr, controllerOptions)",
-		"CredentialsRecheck:    credentialsRecheck,",
-		"ServiceMonitorEnabled: serviceMonitorEnabled,",
-		// The flag says "migrate", the option says "keep": the negation
-		// is what connects them.
-		"KeepStoredImageTag:    !migrateStoredImageTag,",
+		// The options are put together in one function, which has tests
+		// of its own (cmd/main_test.go), and what it returns is what the
+		// two calls above are given.
+		"controllerOptions, err := controllerOptionsFor(commandLine{",
+		"credentialsRecheck:    credentialsRecheck,",
+		"migrateStoredImageTag: migrateStoredImageTag,",
+		"collectorRunAsUser:    collectorRunAsUser,",
+		"}, serviceMonitorEnabled, dc)",
 	} {
 		if !strings.Contains(main, call) {
 			t.Errorf("cmd/main.go no longer contains %q", call)

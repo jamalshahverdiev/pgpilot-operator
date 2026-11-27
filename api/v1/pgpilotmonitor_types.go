@@ -368,6 +368,87 @@ type ImageSpec struct {
 	// +kubebuilder:default=IfNotPresent
 	// +optional
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+
+	// pullSecrets names Secrets in the namespace of the monitor that hold
+	// credentials for the registry of the image (type
+	// kubernetes.io/dockerconfigjson). The kubelet reads them; the operator
+	// does not, and does not check that they exist.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	PullSecrets []SecretName `json:"pullSecrets,omitempty"`
+}
+
+// SecretName names a Secret in the namespace of the monitor.
+type SecretName struct {
+	// name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name"`
+}
+
+// SchedulingSpec says where the collector pod may run. The fields are those
+// of a pod, passed on as they are: what the API server would refuse in a pod
+// is reported when the collector is rolled out, as ApplyRejected or
+// PodCreateFailed.
+type SchedulingSpec struct {
+	// nodeSelector limits the pod to nodes that carry all of these labels.
+	// +kubebuilder:validation:MaxProperties=32
+	// +optional
+	NodeSelector map[string]LabelValue `json:"nodeSelector,omitempty"`
+
+	// tolerations let the pod run on nodes with matching taints.
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=atomic
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// affinity are the node and pod affinity rules of the pod.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// topologySpreadConstraints spread pods over zones or nodes. A
+	// collector is one pod, so a constraint is of use with a labelSelector
+	// that takes in the collectors of the other monitors of the namespace
+	// as well, for example app.kubernetes.io/managed-by: pgpilot-operator;
+	// pods of other namespaces are not counted. As in a pod, there can be
+	// one constraint for each pair of topologyKey and whenUnsatisfiable.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=topologyKey
+	// +listMapKey=whenUnsatisfiable
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// priorityClassName is the PriorityClass of the pod.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?$`
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
+// EnvVar is an environment variable of the pgwatch container.
+// +kubebuilder:validation:XValidation:rule="!has(self.valueFrom) || !has(self.value) || size(self.value) == 0",message="set value or valueFrom, not both"
+type EnvVar struct {
+	// name of the variable.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	Name string `json:"name"`
+
+	// value of the variable. References of the form $(NAME) to variables
+	// that come before it in the list are expanded, as in any pod.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Value string `json:"value,omitempty"`
+
+	// valueFrom takes the value from a Secret, a ConfigMap or a field of
+	// the pod. The pod reads it once, when it starts: a Secret or ConfigMap
+	// that changes later does not replace the pod.
+	// +optional
+	ValueFrom *corev1.EnvVarSource `json:"valueFrom,omitempty"`
 }
 
 // LabelValue is the value of a Kubernetes label: empty, or at most 63
@@ -448,6 +529,40 @@ type PgpilotMonitorSpec struct {
 	// ServiceMonitor selection.
 	// +optional
 	ServiceMetadata ObjectMetadataOverrides `json:"serviceMetadata,omitempty"`
+
+	// scheduling says where the collector pod may run: node selector,
+	// tolerations, affinity, topology spread constraints, priority class.
+	// +optional
+	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
+
+	// serviceAccountName is the ServiceAccount the collector pod runs as,
+	// in the namespace of the monitor; the "default" one when empty. The
+	// collector never talks to the Kubernetes API, and the kubelet mounts
+	// no token of the account into its pod. The account matters to what
+	// is bound to it: image pull secrets, a security context constraint on
+	// OpenShift, and an identity of a cloud provider, which reaches the pod
+	// without that token. Whoever may write a monitor can run a container
+	// as any ServiceAccount of its namespace.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?$`
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// env adds environment variables to the pgwatch container: settings of
+	// the PostgreSQL driver (PGOPTIONS, PGCONNECT_TIMEOUT, ...), of pgwatch
+	// (PW_MIN_DB_SIZE_MB, ...), a proxy. What the operator passes on the
+	// command line or sets itself cannot be given here: the credentials
+	// (PGUSER, PGPASSWORD) and where pgwatch finds its configuration and
+	// sends its measurements (PW_SOURCES, PW_METRICS, PW_SINK,
+	// PW_WEBDISABLE). Whatever is in the connection string (host, port,
+	// database, sslmode) wins over a variable of the same meaning, and
+	// pgwatch names its sessions itself, whatever PGAPPNAME says.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['PGUSER', 'PGPASSWORD', 'PW_SOURCES', 'PW_METRICS', 'PW_SINK', 'PW_WEBDISABLE']))",message="PGUSER, PGPASSWORD, PW_SOURCES, PW_METRICS, PW_SINK and PW_WEBDISABLE are set by the operator and cannot be given in env"
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
 }
 
 // PgpilotMonitorStatus is the observed state of a PgpilotMonitor.

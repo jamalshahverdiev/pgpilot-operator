@@ -2,6 +2,8 @@ package builder
 
 import (
 	"fmt"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +11,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
 )
@@ -432,7 +436,7 @@ func TestBuildDeployment_PodHardening(t *testing.T) {
 			if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
 				t.Errorf("automountServiceAccountToken %v: the collector gets a token it never uses", pod.AutomountServiceAccountToken)
 			}
-			if pod.ServiceAccountName != "" || pod.HostNetwork || pod.HostPID || pod.HostIPC {
+			if pod.ServiceAccountName != "default" || pod.HostNetwork || pod.HostPID || pod.HostIPC {
 				t.Errorf("serviceAccountName %q, hostNetwork %v, hostPID %v, hostIPC %v",
 					pod.ServiceAccountName, pod.HostNetwork, pod.HostPID, pod.HostIPC)
 			}
@@ -681,5 +685,136 @@ func TestBuildDeployment_SinkArgsMatchThePod(t *testing.T) {
 				t.Errorf("ports %+v and readiness probe %+v do not go with the sinks %q", c.Ports, c.ReadinessProbe, got)
 			}
 		})
+	}
+}
+
+// Where the pod runs, as what, and with which registry credentials is the
+// monitor's to say; the fields reach the pod as they are.
+func TestBuildDeployment_Scheduling(t *testing.T) {
+	monitor := newTestMonitor()
+	monitor.Spec.ServiceAccountName = "collector"
+	monitor.Spec.Image.PullSecrets = []pgpilotv1.SecretName{{Name: "registry-a"}, {Name: "registry-b"}}
+	monitor.Spec.Scheduling = &pgpilotv1.SchedulingSpec{
+		NodeSelector: map[string]pgpilotv1.LabelValue{"pool": "monitoring", "disk": ""},
+		Tolerations: []corev1.Toleration{
+			{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "monitoring", Effect: corev1.TaintEffectNoSchedule},
+		},
+		Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{
+					{Key: "topology.kubernetes.io/zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a", "b"}},
+				},
+			}}},
+		}},
+		TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+			MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{LabelAppManagedBy: ManagedBy}},
+		}},
+		PriorityClassName: "monitoring",
+	}
+	pod := BuildDeployment(monitor, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"}).Spec.Template.Spec
+
+	if !maps.Equal(pod.NodeSelector, map[string]string{"pool": "monitoring", "disk": ""}) {
+		t.Errorf("nodeSelector %v", pod.NodeSelector)
+	}
+	if !reflect.DeepEqual(pod.Tolerations, monitor.Spec.Scheduling.Tolerations) ||
+		!reflect.DeepEqual(pod.Affinity, monitor.Spec.Scheduling.Affinity) ||
+		!reflect.DeepEqual(pod.TopologySpreadConstraints, monitor.Spec.Scheduling.TopologySpreadConstraints) {
+		t.Errorf("tolerations %+v\naffinity %+v\nspread %+v", pod.Tolerations, pod.Affinity, pod.TopologySpreadConstraints)
+	}
+	if pod.PriorityClassName != "monitoring" || pod.ServiceAccountName != "collector" {
+		t.Errorf("priorityClassName %q, serviceAccountName %q", pod.PriorityClassName, pod.ServiceAccountName)
+	}
+	want := []corev1.LocalObjectReference{{Name: "registry-a"}, {Name: "registry-b"}}
+	if !slices.Equal(pod.ImagePullSecrets, want) {
+		t.Errorf("imagePullSecrets %v", pod.ImagePullSecrets)
+	}
+	// Whichever account it is, the collector has no use for its token.
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Error("the pod mounts the token of its ServiceAccount")
+	}
+}
+
+// A monitor that says nothing about any of it is rendered as before: a
+// field that appeared in its pod template would restart every collector.
+func TestBuildDeployment_NothingOfItUnlessAsked(t *testing.T) {
+	for name, monitor := range map[string]*pgpilotv1.PgpilotMonitor{
+		"nothing set": newTestMonitor(),
+		"an empty scheduling block": func() *pgpilotv1.PgpilotMonitor {
+			m := newTestMonitor()
+			m.Spec.Scheduling = &pgpilotv1.SchedulingSpec{NodeSelector: map[string]pgpilotv1.LabelValue{}}
+			m.Spec.Env = []pgpilotv1.EnvVar{}
+			m.Spec.Image.PullSecrets = []pgpilotv1.SecretName{}
+			return m
+		}(),
+	} {
+		pod := BuildDeployment(monitor, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"}).Spec.Template.Spec
+		if pod.NodeSelector != nil || pod.Tolerations != nil || pod.Affinity != nil || pod.TopologySpreadConstraints != nil ||
+			pod.PriorityClassName != "" || pod.ImagePullSecrets != nil {
+			t.Errorf("%s: pod %+v", name, pod)
+		}
+		// The account is named even when it is the default one: left out,
+		// the API server would keep the one that was named before.
+		if pod.ServiceAccountName != "default" {
+			t.Errorf("%s: serviceAccountName %q", name, pod.ServiceAccountName)
+		}
+		if env := pod.Containers[0].Env; len(env) != 2 || env[0].Name != "PGUSER" || env[1].Name != "PGPASSWORD" {
+			t.Errorf("%s: env %+v", name, env)
+		}
+		if uid := pod.Containers[0].SecurityContext.RunAsUser; uid == nil || *uid != 65534 {
+			t.Errorf("%s: runAsUser %v", name, uid)
+		}
+	}
+}
+
+// spec.env comes after what the operator sets, so that a value can refer to
+// it, and is passed on as it is.
+func TestBuildDeployment_Env(t *testing.T) {
+	monitor := newTestMonitor()
+	fromSecret := &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+		Name: "proxy", Key: "url",
+	}}
+	monitor.Spec.Env = []pgpilotv1.EnvVar{
+		{Name: "PGAPPNAME", Value: "pgwatch for $(PGUSER)"},
+		{Name: "HTTPS_PROXY", ValueFrom: fromSecret},
+		{Name: "PW_MIN_DB_SIZE_MB", Value: "8"},
+	}
+	env := BuildDeployment(monitor, MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"}).
+		Spec.Template.Spec.Containers[0].Env
+	want := []corev1.EnvVar{
+		{Name: "PGAPPNAME", Value: "pgwatch for $(PGUSER)"},
+		{Name: "HTTPS_PROXY", ValueFrom: fromSecret},
+		{Name: "PW_MIN_DB_SIZE_MB", Value: "8"},
+	}
+	if len(env) != 5 || env[0].Name != "PGUSER" || env[1].Name != "PGPASSWORD" || !reflect.DeepEqual(env[2:], want) {
+		t.Errorf("env %+v", env)
+	}
+}
+
+// The user of the container is the cluster's to decide, not the monitor's.
+func TestBuildDeployment_RunAsUser(t *testing.T) {
+	build := func(options ...PodOption) *corev1.PodSpec {
+		return &BuildDeployment(newTestMonitor(), MergedMetrics{Preset: "basic"}, PodTemplateVersions{Config: "h"}, options...).
+			Spec.Template.Spec
+	}
+	if uid := build().Containers[0].SecurityContext.RunAsUser; uid == nil || *uid != DefaultRunAsUser || DefaultRunAsUser != 65534 {
+		t.Errorf("without an option: %v", uid)
+	}
+	if uid := build(RunAsUser(ptr.To[int64](1001))).Containers[0].SecurityContext.RunAsUser; uid == nil || *uid != 1001 {
+		t.Errorf("with a user: %v", uid)
+	}
+	// Left to the platform: no user is named anywhere in the pod, and the
+	// pod still refuses to run as root.
+	pod := build(RunAsUser(nil))
+	container := pod.Containers[0].SecurityContext
+	if container.RunAsUser != nil || pod.SecurityContext.RunAsUser != nil {
+		t.Errorf("runAsUser %v / %v", container.RunAsUser, pod.SecurityContext.RunAsUser)
+	}
+	if container.RunAsNonRoot == nil || !*container.RunAsNonRoot || pod.SecurityContext.RunAsNonRoot == nil ||
+		!*pod.SecurityContext.RunAsNonRoot {
+		t.Error("without a user the pod may run as root")
+	}
+	if container.RunAsGroup != nil || pod.SecurityContext.FSGroup != nil || pod.SecurityContext.RunAsGroup != nil {
+		t.Errorf("groups are set: %+v / %+v", container, pod.SecurityContext)
 	}
 }

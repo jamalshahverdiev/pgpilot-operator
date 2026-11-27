@@ -25,6 +25,7 @@ package chart
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -227,6 +228,7 @@ var valueSets = map[string][]string{
 	},
 	"fullnameOverride":             {"--set", "fullnameOverride=custom-name"},
 	"credentials recheck interval": {"--set", "credentials.recheckInterval=1m"},
+	"collector user":               {"--set", "collector.runAsUser=none"},
 	"stored image tag kept":        {"--set", "migrations.storedImageTag=false"},
 	"image tag override":           {"--set", "image.tag=v9.9.9"},
 	"image repository override":    {"--set", "image.repository=registry.example.com/mirror/pgpilot-operator"},
@@ -282,6 +284,28 @@ func TestChartCRDs_AreValidCRDManifests(t *testing.T) {
 		}
 		if got := nestedString(obj, "spec", "group"); got != "pgpilot.io" {
 			t.Errorf("%s: spec.group = %q, want pgpilot.io", name, got)
+		}
+	}
+}
+
+// `kubectl apply` without --server-side stores the whole object once more in
+// an annotation, and the API server takes at most 262144 bytes of
+// annotations: a CRD beyond that can only be applied server-side, and a
+// plain `kubectl apply -f` of the installation manifest fails. The schemas
+// of pod fields (affinity above all) are most of the monitor's CRD.
+func TestChartCRDs_FitAClientSideApply(t *testing.T) {
+	const limit = 262144
+	for _, name := range yamlFiles(t, chartCRDDir) {
+		obj := parseYAML(t, readFile(t, filepath.Join(chartCRDDir, name)), name)
+		encoded, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		// Room for what is not in the file: the annotations and labels a
+		// chart or kustomize adds.
+		if len(encoded) > limit*3/4 {
+			t.Errorf("%s is %d bytes as JSON, more than three quarters of the %d a client-side apply can carry; "+
+				"shorten descriptions (controller-gen crd:maxDescLen) or leave a pod field out", name, len(encoded), limit)
 		}
 	}
 }
@@ -683,4 +707,124 @@ func TestRender_StoredImageTagMigration(t *testing.T) {
 			t.Errorf("other arguments changed:\n with:    %v\n without: %v", rest, without)
 		}
 	})
+}
+
+// renderFailure runs `helm template` with arguments it is expected to refuse
+// and returns what helm said.
+func renderFailure(t *testing.T, extraArgs ...string) string {
+	t.Helper()
+	helm := requireHelm(t)
+	args := append([]string{
+		"template", "release", chartDir, "--namespace", "pgpilot-system", "--kube-version", kubeVersion,
+	}, extraArgs...)
+	out, err := exec.Command(helm, args...).CombinedOutput()
+	if err == nil {
+		t.Fatalf("helm %s rendered the chart; it should have refused", strings.Join(args, " "))
+	}
+	return string(out)
+}
+
+// The user of the collector containers is a property of the cluster, and so
+// a value of the chart. Left alone the operator decides: 65534, or none on
+// OpenShift.
+func TestRender_CollectorRunAsUser(t *testing.T) {
+	const flag = "--collector-run-as-user"
+	find := func(args []string) []string {
+		var found []string
+		for _, a := range args {
+			if strings.HasPrefix(a, flag) {
+				found = append(found, a)
+			}
+		}
+		return found
+	}
+
+	for name, set := range map[string][]string{
+		"by default":                 {},
+		"auto, said out loud":        {"--set", "collector.runAsUser=auto"},
+		"an empty value":             {"--set-string", "collector.runAsUser="},
+		"the whole block is missing": {"--set", "collector=null"}, // --reuse-values from before the value existed
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := find(managerArgs(t, render(t, set...))); len(got) != 0 {
+				t.Errorf("renders %q; the flag must be absent so that the operator decides", got)
+			}
+		})
+	}
+
+	for name, tc := range map[string]struct {
+		set  []string
+		want string
+	}{
+		"a user, as a number": {[]string{"--set", "collector.runAsUser=1001"}, flag + "=1001"},
+		"a user, as text":     {[]string{"--set-string", "collector.runAsUser=1001"}, flag + "=1001"},
+		"a user of OpenShift": {[]string{"--set", "collector.runAsUser=1000680000"}, flag + "=1000680000"},
+		"none":                {[]string{"--set", "collector.runAsUser=none"}, flag + "=none"},
+		// A values file, --set-json and the stored values of a release
+		// (helm upgrade --reuse-values) give a number as a float, which
+		// prints as 1.00068e+09 unless it is told not to.
+		"a user of OpenShift, from JSON": {
+			[]string{"--set-json", `collector={"runAsUser":1000680000}`}, flag + "=1000680000",
+		},
+		"a user of OpenShift, from a file": {
+			[]string{"-f", valuesFile(t, "collector:\n  runAsUser: 1000680000\n")}, flag + "=1000680000",
+		},
+		"a quoted user, from a file": {
+			[]string{"-f", valuesFile(t, "collector:\n  runAsUser: \"1001\"\n")}, flag + "=1001",
+		},
+		"none, from a file": {[]string{"-f", valuesFile(t, "collector:\n  runAsUser: none\n")}, flag + "=none"},
+		"the largest user there is": {
+			[]string{"--set-json", `collector={"runAsUser":2147483647}`}, flag + "=2147483647",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			with := managerArgs(t, render(t, tc.set...))
+			if got := find(with); len(got) != 1 || got[0] != tc.want {
+				t.Errorf("args = %v, want exactly one %s", with, tc.want)
+			}
+			var rest []string
+			for _, a := range with {
+				if !strings.HasPrefix(a, flag) {
+					rest = append(rest, a)
+				}
+			}
+			if without := managerArgs(t, render(t)); strings.Join(rest, " ") != strings.Join(without, " ") {
+				t.Errorf("other arguments changed:\n with:    %v\n without: %v", rest, without)
+			}
+		})
+	}
+
+	// What the operator would refuse at start, the chart refuses before
+	// anything is installed.
+	const refusal = `collector.runAsUser must be a user ID from 1 to 2147483647, "none" or "auto"`
+	for name, value := range map[string]string{
+		"root": "0", "a negative number": "-1", "a name": "nobody", "a user and a group": "1001:1001", "a fraction": "1.5",
+		"more than a user ID can be": "2147483648", "far more": "99999999999999999999",
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			if out := renderFailure(t, "--set-string", "collector.runAsUser="+value); !strings.Contains(out, refusal) {
+				t.Errorf("helm said:\n%s", out)
+			}
+		})
+	}
+	for name, value := range map[string]string{
+		"a fraction, as a number": `collector={"runAsUser":1.5}`, "root, as a number": `collector={"runAsUser":0}`,
+		"more than a user ID can be, as a number": `collector={"runAsUser":2147483648}`,
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			if out := renderFailure(t, "--set-json", value); !strings.Contains(out, refusal) {
+				t.Errorf("helm said:\n%s", out)
+			}
+		})
+	}
+}
+
+// valuesFile writes a values file for `helm template -f`.
+func valuesFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
