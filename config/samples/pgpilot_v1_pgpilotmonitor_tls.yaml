@@ -1,0 +1,50 @@
+## Example: a database that is checked against a certificate authority of
+## your own, and that asks the collector for a client certificate.
+##
+## The three Secrets are in the namespace of the monitor:
+##   users-db-ca            ca.crt             the authority that signed the
+##                                             server's certificate
+##   users-db-monitor-cert  tls.crt, tls.key   a certificate whose common name
+##                                             is the database user (a Secret
+##                                             of type kubernetes.io/tls, as
+##                                             cert-manager writes it)
+##   receiver-ca            ca.crt             the authority of the gRPC
+##                                             receiver
+## The operator reports a Secret that is missing or holds no certificate in
+## the monitor's status, and replaces the collector pod when one is renewed.
+
+apiVersion: pgpilot.io/v1
+kind: PgpilotMonitor
+metadata:
+  name: prod-users-db-tls
+  namespace: team-users
+spec:
+  database:
+    host: users-db.team-users.svc.cluster.local
+    port: 5432
+    database: users
+    # verify-full: the server's certificate has to be signed by the authority
+    # below and has to be for the host above. Certificates are refused with
+    # an sslmode that would not use them, and sslmode is "disable" unless set.
+    sslmode: verify-full
+    credentialsSecret:
+      name: users-db-monitor-creds
+    tls:
+      caSecretRef:
+        name: users-db-ca
+      # Only for a server that asks for a client certificate.
+      clientCertSecretRef:
+        name: users-db-monitor-cert
+
+  metrics:
+    preset: basic
+
+  sinks:
+    prometheus:
+      enabled: true
+    grpc:
+      enabled: true
+      endpoint: metrics-receiver.monitoring.svc.cluster.local:9000
+      # Naming an authority is what turns TLS on for the sink.
+      tls:
+        caSecretRef: receiver-ca

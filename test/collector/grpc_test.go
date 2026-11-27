@@ -70,7 +70,7 @@ func (asReceived) Unmarshal(data []byte, v any) error {
 	return nil
 }
 
-func startReceiver(t *testing.T) *receiver {
+func startReceiver(t *testing.T, options ...grpc.ServerOption) *receiver {
 	t.Helper()
 	// On every address: the collector comes in over the container
 	// network's gateway, not over the loopback.
@@ -82,7 +82,7 @@ func startReceiver(t *testing.T) *receiver {
 		endpoint: fmt.Sprintf("%s:%d", receiverHost, listener.Addr().(*net.TCPAddr).Port),
 		calls:    map[string][][]byte{},
 	}
-	server := grpc.NewServer(
+	server := grpc.NewServer(append(options,
 		grpc.ForceServerCodec(asReceived{}), // every message as raw bytes, whatever its type
 		grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
 			method, _ := grpc.MethodFromServerStream(stream)
@@ -95,19 +95,19 @@ func startReceiver(t *testing.T) *receiver {
 			r.mu.Unlock()
 			return stream.SendMsg(&[]byte{})
 		}),
-	)
+	)...)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	return r
 }
 
-// received returns the messages of the calls whose method ends in suffix.
-func (r *receiver) received(suffix string) [][]byte {
+// measurements returns the messages of the calls that deliver measurements.
+func (r *receiver) measurements() [][]byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out [][]byte
 	for method, messages := range r.calls {
-		if strings.HasSuffix(method, suffix) {
+		if strings.HasSuffix(method, "/UpdateMeasurements") {
 			out = append(out, messages...)
 		}
 	}
@@ -146,7 +146,7 @@ func TestGRPCSinkAlone(t *testing.T) {
 
 	// The envelope names the source and the metric as plain strings.
 	delivered := func() bool {
-		for _, message := range sink.received("/UpdateMeasurements") {
+		for _, message := range sink.measurements() {
 			if bytes.Contains(message, []byte("grpc-only")) && bytes.Contains(message, []byte("instance_up")) {
 				return true
 			}

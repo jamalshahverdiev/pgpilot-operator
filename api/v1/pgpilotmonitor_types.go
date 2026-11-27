@@ -50,6 +50,8 @@ const (
 // +kubebuilder:validation:XValidation:rule="(has(self.username) && has(self.password)) != has(self.credentialsSecret)",message="set either inline username+password or credentialsSecret, not both (and not neither)"
 // +kubebuilder:validation:XValidation:rule="!has(self.username) || has(self.password)",message="password is required when username is set inline"
 // +kubebuilder:validation:XValidation:rule="!has(self.password) || has(self.username)",message="username is required when password is set inline"
+// +kubebuilder:validation:XValidation:rule="!has(self.tls) || !has(self.tls.caSecretRef) || (has(self.sslmode) && self.sslmode in ['require', 'verify-ca', 'verify-full'])",message="tls.caSecretRef needs sslmode require, verify-ca or verify-full: with any other the server's certificate is not checked against it"
+// +kubebuilder:validation:XValidation:rule="!has(self.tls) || !has(self.tls.clientCertSecretRef) || (has(self.sslmode) && self.sslmode != 'disable')",message="tls.clientCertSecretRef needs an sslmode other than disable: a connection without TLS presents no certificate"
 type DatabaseRef struct {
 	// host of the PostgreSQL server: a DNS name, an IPv4 address or an IPv6
 	// address (with or without square brackets). The port goes into `port`,
@@ -99,6 +101,15 @@ type DatabaseRef struct {
 	// +optional
 	CredentialsSecret *CredentialsSecretRef `json:"credentialsSecret,omitempty"`
 
+	// tls names the certificates for the connection: the certificate
+	// authority the server's certificate is checked against, and a client
+	// certificate for a server that asks for one. Whether TLS is used at
+	// all, and how strictly the server is checked, is what sslmode says,
+	// which is "disable" unless it is set: certificates are refused with
+	// an sslmode that would leave them unused.
+	// +optional
+	TLS *DatabaseTLS `json:"tls,omitempty"`
+
 	// customTags are added to every measurement as additional labels.
 	// Useful for `env`, `team`, `tier`, etc. Passed through to pgwatch
 	// source configuration verbatim.
@@ -116,6 +127,71 @@ type DatabaseRef struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(k, size(k) > 0 && !k.startsWith('__') && k != 'dbname')",message="customTags keys must not be empty, must not start with __ and must not be dbname"
 	// +optional
 	CustomTags map[string]string `json:"customTags,omitempty"`
+}
+
+// DatabaseTLS names the Secrets, in the namespace of the monitor, that hold
+// the certificates for the connection to the database. The collector pod
+// mounts them read-only; the operator checks that they exist and replaces
+// the pod when one of them changes.
+type DatabaseTLS struct {
+	// caSecretRef names the Secret with the certificate authority (one or
+	// more PEM certificates) that the server's certificate has to be signed
+	// by. It is what sslmode verify-ca and verify-full check against;
+	// without it they go by the certificate authorities of the pgwatch
+	// image, which are the public ones and know nothing of a private CA.
+	// With sslmode require it makes the collector check the certificate
+	// as verify-ca does.
+	// +optional
+	CASecretRef *CASecretRef `json:"caSecretRef,omitempty"`
+
+	// clientCertSecretRef names the Secret with a client certificate and
+	// its private key, for a server that asks for one (pg_hba.conf method
+	// "cert", or clientcert=verify-full). A Secret of type
+	// kubernetes.io/tls has the keys this expects by default.
+	// +optional
+	ClientCertSecretRef *ClientCertSecretRef `json:"clientCertSecretRef,omitempty"`
+}
+
+// CASecretRef points at a certificate authority in a Secret.
+type CASecretRef struct {
+	// name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name"`
+
+	// key inside the Secret that holds the PEM certificates. Defaults to
+	// "ca.crt".
+	// +kubebuilder:default=ca.crt
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]*$`
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// ClientCertSecretRef points at a client certificate and its key in a Secret.
+type ClientCertSecretRef struct {
+	// name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name"`
+
+	// certKey is the key inside the Secret that holds the PEM certificate.
+	// Defaults to "tls.crt".
+	// +kubebuilder:default=tls.crt
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]*$`
+	// +optional
+	CertKey string `json:"certKey,omitempty"`
+
+	// keyKey is the key inside the Secret that holds the PEM private key,
+	// not encrypted. Defaults to "tls.key".
+	// +kubebuilder:default=tls.key
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]*$`
+	// +optional
+	KeyKey string `json:"keyKey,omitempty"`
 }
 
 // CredentialsSecretRef points at a Secret in the same namespace as the
@@ -246,8 +322,8 @@ type GRPCSink struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// tls configures optional TLS for the gRPC connection. When nil, the
-	// connection is plaintext.
+	// tls makes the collector connect to the Receiver with TLS. Without
+	// it, or without a caSecretRef in it, the connection is plaintext.
 	// +optional
 	TLS *GRPCTLS `json:"tls,omitempty"`
 }
@@ -255,7 +331,16 @@ type GRPCSink struct {
 // GRPCTLS holds TLS material for the gRPC sink.
 type GRPCTLS struct {
 	// caSecretRef is the name of a Secret in the same namespace that
-	// contains the CA certificate under the key "ca.crt".
+	// contains, under the key "ca.crt", the certificate authority the
+	// Receiver's certificate has to be signed by. Naming it is what turns
+	// TLS on: the collector then refuses a Receiver whose certificate that
+	// authority did not sign, or that is not for the host in endpoint. The
+	// pod mounts the Secret read-only and is replaced when it changes.
+	//
+	// The field has no validation of its own: it was stored, and did
+	// nothing, before it had a meaning, and a rule added now would refuse
+	// writes to such monitors. The operator reports a value that is not
+	// the name of a Secret.
 	// +optional
 	CASecretRef string `json:"caSecretRef,omitempty"`
 }

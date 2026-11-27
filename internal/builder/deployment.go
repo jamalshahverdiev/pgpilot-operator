@@ -126,6 +126,9 @@ func BuildDeployment(
 			},
 		},
 	}
+	tlsVolumes, tlsMounts := tlsVolumes(monitor)
+	container.VolumeMounts = append(container.VolumeMounts, tlsMounts...)
+
 	var minReadySeconds int32
 	if PrometheusSinkEnabled(monitor) {
 		port := prometheusPort(monitor)
@@ -173,7 +176,7 @@ func BuildDeployment(
 					Containers: []corev1.Container{container},
 					// The collector never talks to the Kubernetes API.
 					AutomountServiceAccountToken: new(false),
-					Volumes: []corev1.Volume{
+					Volumes: append([]corev1.Volume{
 						{
 							Name: configVolumeName,
 							ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -184,7 +187,7 @@ func BuildDeployment(
 							Name:     tmpVolumeName,
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
 						},
-					},
+					}, tlsVolumes...),
 					// With the container's settings above, this is what the
 					// "restricted" Pod Security Standard asks for.
 					SecurityContext: &corev1.PodSecurityContext{
@@ -215,7 +218,7 @@ func buildArgs(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) []string
 	}
 
 	if GRPCSinkEnabled(monitor) {
-		args = append(args, "--sink", "grpc://"+monitor.Spec.Sinks.GRPC.Endpoint)
+		args = append(args, "--sink", grpcSinkAddress(monitor))
 	}
 
 	return args

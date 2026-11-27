@@ -161,11 +161,13 @@ func buildConnStr(db pgpilotv1.DatabaseRef) string {
 	// drop the sslmode after it. For plain host and database names the
 	// result is identical to the previous format.
 	host := strings.TrimSuffix(strings.TrimPrefix(db.Host, "["), "]")
+	params := url.Values{"sslmode": {string(sslmode)}}
+	databaseTLSParams(db, params)
 	u := url.URL{
 		Scheme:   "postgresql",
 		Host:     net.JoinHostPort(host, strconv.Itoa(int(port))),
 		Path:     "/" + db.Database,
-		RawQuery: url.Values{"sslmode": {string(sslmode)}}.Encode(),
+		RawQuery: params.Encode(),
 	}
 	return u.String()
 }

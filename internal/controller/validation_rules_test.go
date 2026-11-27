@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -659,6 +660,114 @@ var _ = Describe("CRD validation rules", func() {
 			pass, _, _ := unstructured.NestedString(got.Object, "spec", "database", "credentialsSecret", "passwordKey")
 			Expect(user).To(Equal("db.user-name_1"))
 			Expect(pass).To(Equal("password"), "passwordKey must be defaulted")
+		})
+
+		// The Secrets that certificates are mounted from are named by the
+		// rules of the credentials Secret: what could not be the name of a
+		// Secret, or of a key in one, is refused when it is written.
+		verified := set("verify-full", "database", "sslmode")
+
+		DescribeTable("rejects a certificate Secret name that is not an object name",
+			func(path ...string) {
+				for _, name := range []string{"other-namespace/victim", "..", "Upper", "a_b", "", strings.Repeat("a", 254)} {
+					expectRejected(monitor("unusable", verified, set(map[string]any{"name": name}, path...)),
+						"spec."+strings.Join(path, ".")+".name")
+				}
+				// Without a name there is nothing to mount.
+				expectRejected(monitor("unusable", verified, set(map[string]any{}, path...)), "spec."+strings.Join(path, ".")+".name")
+			},
+			Entry("the database's authority", "database", "tls", "caSecretRef"),
+			Entry("the client certificate", "database", "tls", "clientCertSecretRef"),
+		)
+
+		DescribeTable("rejects certificate keys that cannot exist, and limits them to 253 characters",
+			func(field string, path ...string) {
+				at := "spec." + strings.Join(path, ".") + "." + field
+				expectRejected(monitor("unusable", verified, set(map[string]any{"name": "certs", field: "bad key"}, path...)), at)
+				expectRejected(monitor("too-long", verified, set(map[string]any{"name": "certs", field: strings.Repeat("k", 254)}, path...)), at)
+				expectAccepted(monitor("max-certificate-key", verified,
+					set(map[string]any{"name": "certs", field: strings.Repeat("k", 253)}, path...)))
+			},
+			Entry("key of the authority", "key", "database", "tls", "caSecretRef"),
+			Entry("certKey of the client certificate", "certKey", "database", "tls", "clientCertSecretRef"),
+			Entry("keyKey of the client certificate", "keyKey", "database", "tls", "clientCertSecretRef"),
+		)
+
+		It("accepts certificates and defaults their keys", func() {
+			got := stored(monitor("with-certificates", verified, set(map[string]any{
+				"caSecretRef":         map[string]any{"name": "pg-ca"},
+				"clientCertSecretRef": map[string]any{"name": "pg-client", "certKey": "client.pem"},
+			}, "database", "tls")))
+			for path, want := range map[string]string{
+				"caSecretRef.key": "ca.crt", "clientCertSecretRef.certKey": "client.pem", "clientCertSecretRef.keyKey": "tls.key",
+			} {
+				value, _, _ := unstructured.NestedString(got.Object,
+					append([]string{"spec", "database", "tls"}, strings.Split(path, ".")...)...)
+				Expect(value).To(Equal(want), path)
+			}
+		})
+
+		// An empty block is a monitor without certificates, as one that has
+		// no block at all.
+		It("accepts a tls block with nothing in it", func() {
+			expectAccepted(monitor("empty-tls", verified, set(map[string]any{}, "database", "tls")))
+		})
+
+		// sslmode is "disable" unless it is set, and with it, as with allow
+		// and prefer, nothing checks the server against an authority. A
+		// monitor that names one and is left on such a mode would look
+		// protected and not be.
+		DescribeTable("refuses certificates with an sslmode that leaves them unused",
+			func(sslmode string, wantCA, wantClient bool) {
+				mode := func(map[string]any) {}
+				if sslmode != "" {
+					mode = set(sslmode, "database", "sslmode")
+				}
+				ca := monitor("ca-"+sslmode, mode, set(map[string]any{"name": "pg-ca"}, "database", "tls", "caSecretRef"))
+				client := monitor("client-"+sslmode, mode,
+					set(map[string]any{"name": "pg-client"}, "database", "tls", "clientCertSecretRef"))
+				if wantCA {
+					expectAccepted(ca)
+				} else {
+					expectRejected(ca, "tls.caSecretRef needs sslmode require, verify-ca or verify-full")
+				}
+				if wantClient {
+					expectAccepted(client)
+				} else {
+					expectRejected(client, "tls.clientCertSecretRef needs an sslmode other than disable")
+				}
+			},
+			Entry("the default", "", false, false),
+			Entry("disable", "disable", false, false),
+			Entry("allow", "allow", false, true),
+			Entry("prefer", "prefer", false, true),
+			Entry("require", "require", true, true),
+			Entry("verify-ca", "verify-ca", true, true),
+			Entry("verify-full", "verify-full", true, true),
+		)
+
+		It("refuses turning TLS off under certificates that are named", func() {
+			obj := stored(monitor("tls-then-off", verified,
+				set(map[string]any{"name": "pg-ca"}, "database", "tls", "caSecretRef")))
+			Expect(unstructured.SetNestedField(obj.Object, "disable", "spec", "database", "sslmode")).To(Succeed())
+			err := k8sClient.Update(context.TODO(), obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("tls.caSecretRef needs sslmode"))
+		})
+
+		// The field of the gRPC sink's authority was stored, and did
+		// nothing, before it had a meaning. A rule added to it now would
+		// refuse writes to monitors that hold a value it does not like; what
+		// cannot be the name of a Secret is the operator's to report.
+		It("puts no rule on the name of the gRPC sink's authority", func() {
+			grpc := func(name string) mutation {
+				return set(map[string]any{
+					"enabled": true, "endpoint": "receiver:9000", "tls": map[string]any{"caSecretRef": name},
+				}, "sinks", "grpc")
+			}
+			for i, name := range []string{"receiver-ca", "", "monitoring/receiver-ca", "Receiver_CA", strings.Repeat("a", 300)} {
+				expectAccepted(monitor("grpc-tls-"+strconv.Itoa(i), grpc(name)))
+			}
 		})
 	})
 

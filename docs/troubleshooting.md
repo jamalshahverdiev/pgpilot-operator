@@ -24,8 +24,9 @@ error):
 | `Unschedulable` | No node can take the pod: requests too large, taints, node selectors |
 | `PodCreateFailed` | No pod could be created at all: a ResourceQuota, a LimitRange, Pod Security admission. The message is the API server's |
 | `RolloutStuck` | The rollout made no progress for ten minutes and nothing more specific is known. Look at `kubectl describe deploy,rs,pod -l pgpilot.io/monitor=<name>` |
-| `SecretNotFound`, `SecretKeyMissing`, `SecretReadFailed`, `NoCredentials` | Credentials, see below |
-| `GeneratedSecretReferenced` | `spec.database.credentialsSecret` names `pgpilot-<name>-credentials`, the Secret the operator generates from inline credentials and removes once a monitor has none. Create a Secret of your own under another name, with the same `username` and `password`, and name that; or keep the inline credentials. Nothing is changed for the monitor until then |
+| `SecretNotFound`, `SecretKeyMissing`, `SecretReadFailed`, `NoCredentials` | Credentials or certificates, see below. The message names the Secret; for a certificate also the field of the monitor that names it |
+| `InvalidCertificate` | A Secret named under `spec.database.tls` or `spec.sinks.grpc.tls` has its keys, and they do not hold what the collector can load, see below |
+| `GeneratedSecretReferenced` | `spec.database.credentialsSecret`, or a field that names a Secret with a certificate, names `pgpilot-<name>-credentials`, the Secret the operator generates from inline credentials and removes once a monitor has none. Create a Secret of your own under another name, with the same `username` and `password`, and name that; or keep the inline credentials. Nothing is changed for the monitor until then |
 | `LibraryResolveFailed` | A referenced metric library is missing, see below |
 | `InvalidMetric` | A metric definition, of a library or of the monitor itself, was stored before a validation rule existed and breaks it, see below |
 | `InvalidPreset` | See [Monitor reports InvalidPreset](#monitor-reports-invalidpreset) |
@@ -50,11 +51,12 @@ what it is waiting for:
   `Unschedulable`, ...): every minute, to see whether the reason is still the
   same. The end of the problem does not wait for that: a pod that becomes
   ready changes its Deployment, which the operator watches;
-- a missing Secret, Secret key or metric library, and `NameConflict`: every
-  30 seconds;
+- a missing Secret, Secret key or metric library, `InvalidCertificate` and
+  `NameConflict`: every 30 seconds;
 - `ApplyRejected`: every five minutes;
-- `InvalidName`, `InvalidPreset`, `NoSinkEnabled` and
-  `GeneratedSecretReferenced`: not until the monitor is changed;
+- `InvalidName`, `InvalidPreset`, `NoSinkEnabled`,
+  `GeneratedSecretReferenced` and a `SecretNotFound` for a name that no
+  Secret can have: not until the monitor is changed;
 - `InvalidMetric`: not until the monitor, or the library that is named, is
   changed;
 - `SecretReadFailed`, `ApplyFailed`, `ConfigBuildFailed`: retried with
@@ -65,13 +67,25 @@ every case.
 
 ### SecretNotFound
 
-The credentials Secret referenced by `spec.database.credentialsSecret.name` does not exist in the monitor's namespace.
+A Secret the monitor names does not exist in the monitor's namespace: the
+credentials Secret (`spec.database.credentialsSecret.name`), or one that holds
+a certificate (`spec.database.tls.caSecretRef`,
+`spec.database.tls.clientCertSecretRef`, `spec.sinks.grpc.tls.caSecretRef`).
+For a certificate the message says which field names it.
 
 ```bash
 kubectl get secret <secret-name> -n <namespace>
 ```
 
-Fix: create the Secret or correct the name.
+Fix: create the Secret or correct the name. A Secret that cert-manager is
+still issuing appears on its own; the operator looks again every 30 seconds.
+
+`cannot exist: that is not the name of a Secret` is a value in
+`spec.sinks.grpc.tls.caSecretRef` that no Secret can be called, such as
+`monitoring/receiver-ca`. The API server takes whatever is written there,
+because the field was stored before it had a meaning. The Secret has to be
+in the monitor's namespace and is named without one. The operator does not
+look again until the monitor is changed.
 
 ### NoCredentials
 
@@ -249,6 +263,53 @@ kubectl get secret <secret-name> -n <namespace> -o jsonpath='{.data}'
 An empty password is accepted, for databases that trust the monitoring role;
 the key has to exist.
 
+For a certificate the keys are `ca.crt` for an authority, and `tls.crt` and
+`tls.key` for a client certificate, unless the monitor names others (`key`,
+`certKey`, `keyKey`). The Secret of the gRPC sink's authority always uses
+`ca.crt`. A key with an empty value counts as absent.
+
+### InvalidCertificate
+
+The Secret and its keys are there, and what they hold is not what the
+collector can load. The operator checks it the way pgwatch would, before a
+pod is made: a pod with such a Secret starts, and then cannot connect to the
+database, or exits over its gRPC sink, and only its log says why. The message
+names the Secret, the field and the key, and never repeats what the Secret
+holds.
+
+- `holds no PEM certificate`: the key of an authority, or of a client
+  certificate, has no `-----BEGIN CERTIFICATE-----` block in it; for an
+  authority also when no block of it can be read as a certificate. Usual
+  reasons: the certificate was base64-encoded once more before it was put
+  into the Secret, it is in DER form, or the key holds a private key.
+- `holds a PEM certificate that cannot be read`: the block is there and what
+  is in it is damaged or cut short (`openssl x509 -noout` on it says how).
+- `holds no PEM block`: the same for the private key of a client
+  certificate: DER, or encoded once more.
+- `do not hold a PEM certificate and, as the first PEM block, its private
+  key`: the private key is not the first block of its value, or cannot be
+  read as a key. pgwatch reads the first PEM block as the key and nothing
+  after it: a key written by `openssl ecparam -genkey` comes after a block of
+  curve parameters and is not found (`openssl pkcs8 -topk8 -nocrypt -in
+  tls.key` writes it alone). With `the key is not the one of the
+  certificate` at the end, both were read and do not belong together.
+- `holds a private key under a passphrase`: nothing hands the collector a
+  passphrase. Store the key without one.
+
+```bash
+# the certificate: whose it is and until when
+kubectl get secret <secret-name> -n <namespace> -o jsonpath='{.data.ca\.crt}' \
+  | base64 -d | openssl x509 -noout -subject -enddate
+# the private key: only its first line, which has to be -----BEGIN ... PRIVATE KEY-----
+kubectl get secret <secret-name> -n <namespace> -o jsonpath='{.data.tls\.key}' \
+  | base64 -d | head -1
+```
+
+A monitor that was running keeps its collector, with the certificate it
+started with, while this is reported. The operator does not look at dates: a
+certificate that has expired is loaded, and refused by the other side, see
+[Monitor is Ready but there are no metrics](#monitor-is-ready-but-there-are-no-metrics).
+
 ### SecretReadFailed
 
 The operator could not ask the API server for the Secret (the message carries
@@ -268,7 +329,8 @@ kubectl logs -n <namespace> -l pgpilot.io/monitor=<name>
 
 and at the `pgwatch_instance_up` metric (`0` while the database cannot be
 reached). Usual causes: wrong host or port, a wrong password, a `sslmode` the
-server does not support, a network policy or firewall in between.
+server does not support, a certificate the collector does not accept, a
+network policy or firewall in between.
 
 The first line pgwatch logs for a source tells which case it is:
 
@@ -278,6 +340,25 @@ The first line pgwatch logs for a source tells which case it is:
   refused`, ...) - it cannot connect; fix what the error names. When the
   password comes from a Secret, the operator replaces the pod once the Secret
   changes.
+- `x509: certificate signed by unknown authority` - with `sslmode:
+  verify-ca` or `verify-full` the server's certificate is checked against
+  the public authorities of the pgwatch image unless the monitor names its
+  own in `spec.database.tls.caSecretRef`; with one named, also under
+  `sslmode: require`, it is not the one that signed the server's
+  certificate.
+- `x509: certificate is valid for ..., not ...` - `verify-full` also compares
+  the name in the certificate with `spec.database.host`. Use the name the
+  certificate was issued for, or `verify-ca`.
+- `x509: certificate has expired or is not yet valid` - the server's
+  certificate, or the authority in the Secret.
+- `tls: certificate required` or `connection requires a valid client
+  certificate` - the server asks for a client certificate
+  (`spec.database.tls.clientCertSecretRef`); `certificate authentication
+  failed for user` - it got one whose common name is not the database user.
+- `unable to read CA file` or `unable to read sslkey` with `no such file or
+  directory`, in a pod that was running before certificates were added to
+  the monitor: see [Adding certificates to a running
+  monitor](#adding-certificates-to-a-running-monitor).
 
 ## Some metrics are missing, late or arrive in bursts
 
@@ -562,18 +643,22 @@ Condition reasons on `CredentialsAvailable`:
 - `ApplyFailed` — that Secret could not be written; the usual reason is an
   operator newer than its ClusterRole (`is forbidden: ... cannot patch
   resource "secrets"`, or `cannot create`, in the message)
-- `GeneratedSecretReferenced` — `credentialsSecret` names the Secret the
+- `GeneratedSecretReferenced` — `credentialsSecret`, or a certificate, names the Secret the
   operator generates; see the table at the top
 - `CredentialsFound` — the `credentialsSecret` exists and has a value under both keys
-- `SecretNotFound` — the referenced Secret is missing
+- `SecretNotFound` — the referenced Secret is missing: the credentials Secret, or
+  one a certificate is mounted from
 - `SecretKeyMissing` — the Secret exists but has no value under the key named in the
-  message (`username` / `password`, or the `usernameKey` / `passwordKey` you set)
+  message (`username` / `password`, or the `usernameKey` / `passwordKey` you set;
+  `ca.crt`, `tls.crt`, `tls.key` or the keys you set for a certificate)
+- `InvalidCertificate` — a Secret a certificate is mounted from does not hold one
+  the collector can load
 - `SecretReadFailed` — the API server could not be asked for the Secret; the operator
   retries on its own
 - `NoCredentials` — neither inline credentials nor a `credentialsSecret` are set
 
 `CredentialsAvailable: True` means the pod can start with the configured
-credentials. It does not mean the database accepts them: pgwatch keeps running
+credentials and certificates. It does not mean the database accepts them: pgwatch keeps running
 and retrying when a login fails. Check `pgwatch_instance_up` and the pod log
 for that. (Up to v1.0.2 this condition was called `DatabaseReachable`.)
 
@@ -604,3 +689,41 @@ The interval is the operator flag `--credentials-recheck-interval` (at least
 Any change to the Secret object replaces the pod, including a change to its
 labels or annotations only. Tools that rewrite a Secret on every sync without
 changing its content therefore restart the collector on every sync.
+
+## Renewing a certificate
+
+The Secrets named under `spec.database.tls` and `spec.sinks.grpc.tls` are
+followed like a credentials Secret: read again every five minutes, and a
+changed one replaces the collector pod, because pgwatch reads the files once,
+when it starts. cert-manager renews a certificate by rewriting its Secret, so
+a renewal reaches the collector on its own within that interval; annotate the
+monitor as above to have it at once.
+
+Renew before the old certificate expires by more than the interval. When an
+authority is replaced, put the old and the new certificate into the Secret
+together (`ca.crt` may hold several) until every server has a certificate of
+the new one.
+
+A renewal that leaves the Secret unusable (`SecretKeyMissing`,
+`InvalidCertificate`) is reported and changes nothing for the running
+collector, which keeps what it started with.
+
+## Adding certificates to a running monitor
+
+The pod is replaced, and the pod it replaces keeps collecting until the new
+one is available, with one exception to know about. Where pgwatch finds the
+certificates is part of the connection string, which is in the monitor's
+ConfigMap, and the ConfigMap is one for both pods. pgwatch reads it again
+every two minutes. If the new pod does not become available - it cannot be
+scheduled, its image cannot be pulled, its gRPC receiver refuses it - the
+old pod picks up a connection string that names files it does not have,
+logs `unable to read CA file: open /etc/pgwatch-tls/...: no such file or
+directory` at its next look (`unable to read sslkey: ...` when only a client
+certificate was added) and collects nothing until the rollout is put right
+or the certificates are taken out of the monitor again. The same holds
+for any change of the connection string during a rollout that is stuck, a
+changed `sslmode` or `host` included.
+
+The monitor reports the stuck rollout (`CrashLoopBackOff`, `Unschedulable`,
+`ImagePullBackOff`, ...) as soon as it is known. A missing or unusable
+Secret is not such a case: it is found before anything is changed.

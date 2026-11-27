@@ -10,6 +10,7 @@ Kubernetes operator for declarative PostgreSQL monitoring via [pgwatch](https://
 - **Reusable metric libraries** — `PgpilotMetricLibrary` lets teams share custom SQL metrics across monitors.
 - **Prometheus / vmagent ready** — Prometheus sink enabled by default. Custom labels and annotations on pods and services for annotation-based discovery.
 - **Optional ServiceMonitor** — auto-generated when prometheus-operator CRD is detected.
+- **TLS with your own certificates** — a certificate authority and a client certificate for the database, an authority for the gRPC receiver, each from a Secret. Checked before a pod is made; a renewed certificate (cert-manager) replaces the collector on its own.
 - **GitOps-first** — pgwatch runs in read-only file mode. The operator is the single source of truth.
 - **Hardened** — non-root, read-only root filesystem, drop all capabilities. The operator reads a Secret only by name (no list, no watch) and keeps only its own objects in memory. The one Secret it writes is the one it generates for a monitor with inline credentials; for that its ClusterRole allows `create`, `patch` and `delete` on Secrets, which Kubernetes cannot limit to a name (see [architecture.md](docs/architecture.md#credentials-and-what-the-operator-reads)).
 

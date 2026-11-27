@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -224,6 +226,10 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 	if stop != nil {
 		return *stop
 	}
+	if creds, stop = r.resolveCertificates(ctx, status, creds); stop != nil {
+		return *stop
+	}
+	status.set(conditionCredentials, metav1.ConditionTrue, creds.reason, creds.message)
 
 	// --- Step 2: Resolve metric libraries. ---
 	libraries, err := r.resolveLibraries(ctx, monitor)
@@ -642,9 +648,16 @@ type credentials struct {
 	// fromSecret is true when the credentials come from a referenced Secret,
 	// which nothing but a periodic look tells the operator about.
 	fromSecret bool
-	// version changes whenever the Secret the pod reads changes: the
-	// referenced one, or the one generated from inline credentials.
+	// version changes whenever a Secret the pod reads changes: the
+	// referenced one or the one generated from inline credentials, and
+	// those it mounts certificates from.
 	version string
+	// reason and message of the CredentialsAvailable condition once
+	// everything the pod takes from Secrets has been found. It is set in
+	// one place, at the end: a condition that went to True for the
+	// credentials and back to False for a certificate would have a new
+	// transition time, and be written, at every look.
+	reason, message string
 }
 
 // resolveCredentials checks that the monitor has credentials the collector
@@ -690,9 +703,12 @@ func (r *PgpilotMonitorReconciler) resolveCredentials(
 			status.set(conditionCredentials, metav1.ConditionFalse, stop.reason, stop.message)
 			return credentials{}, stop
 		}
-		status.set(conditionCredentials, metav1.ConditionTrue, "InlineCredentials",
-			fmt.Sprintf("Inline username and password are set; the collector reads them from Secret %q", generated.Name))
-		return credentials{version: credentialsVersion(generated)}, nil
+		return credentials{
+			version: credentialsVersion(generated),
+			reason:  "InlineCredentials",
+			message: fmt.Sprintf("Inline username and password are set; the collector reads them from Secret %q",
+				generated.Name),
+		}, nil
 
 	case db.CredentialsSecret != nil:
 		ref := db.CredentialsSecret
@@ -737,14 +753,112 @@ func (r *PgpilotMonitorReconciler) resolveCredentials(
 				fmt.Sprintf("Secret %q has no key %q", ref.Name, passwordKey))
 		}
 
-		status.set(conditionCredentials, metav1.ConditionTrue, "CredentialsFound",
-			fmt.Sprintf("Secret %q provides keys %q and %q", ref.Name, usernameKey, passwordKey))
-		return credentials{fromSecret: true, version: credentialsVersion(&secret)}, nil
+		return credentials{
+			fromSecret: true,
+			version:    credentialsVersion(&secret),
+			reason:     "CredentialsFound",
+			message:    fmt.Sprintf("Secret %q provides keys %q and %q", ref.Name, usernameKey, passwordKey),
+		}, nil
 
 	default:
 		return credentials{}, unavailable(reasonNoCredentials,
 			"spec.database has no inline username/password and no credentialsSecret")
 	}
+}
+
+// resolveCertificates checks the Secrets the collector pod mounts
+// certificates from (builder.MountedSecrets): the certificate authority of
+// the database, a client certificate, the certificate authority of the gRPC
+// sink. A pod that names a Secret or a key that is not there does not start,
+// and one that is handed something that is no certificate fails later, where
+// only its log says so; both are reported here instead, under the condition
+// and the reasons of the credentials, of which these are a part.
+//
+// The pod reads the files once, when it starts. Their versions are folded
+// into the token of the pod template, so that a renewed certificate replaces
+// the pod, and the Secrets are looked at again like a credentials Secret.
+// A monitor without certificates gets back what it came with.
+func (r *PgpilotMonitorReconciler) resolveCertificates(
+	ctx context.Context,
+	status *monitorStatus,
+	creds credentials,
+) (credentials, *outcome) {
+	monitor := status.monitor
+	mounted := builder.MountedSecrets(monitor)
+	if len(mounted) == 0 {
+		return creds, nil
+	}
+	unavailable := func(reason, message string) *outcome {
+		status.set(conditionCredentials, metav1.ConditionFalse, reason, message)
+		return &outcome{reason: reason, message: message, requeueAfter: r.credentialsRetry()}
+	}
+
+	versions := make([]string, 0, len(mounted)+1)
+	versions = append(versions, creds.version)
+	names := make([]string, 0, len(mounted))
+	for _, need := range mounted {
+		// No name of a Secret is longer than 253 characters. The field of
+		// the gRPC sink takes anything, a pasted certificate included, and
+		// a message with all of it would be one the API server refuses.
+		shown := need.Name
+		if len(shown) > validation.DNS1123SubdomainMaxLength {
+			shown = fmt.Sprintf("%s... (%d characters)", strings.ToValidUTF8(shown[:63], ""), len(shown))
+		}
+		what := fmt.Sprintf("Secret %q, named by %s,", shown, need.Field)
+		// The name of the gRPC sink's authority is whatever was stored in
+		// that field before it had a meaning. One with a "/" in it never
+		// reaches the API server: the client refuses to ask, which would
+		// look like a Secret that cannot be read, and be retried for ever.
+		if problems := validation.IsDNS1123Subdomain(need.Name); len(problems) > 0 {
+			stop := unavailable(reasonSecretNotFound, fmt.Sprintf(
+				"%s cannot exist: that is not the name of a Secret (%s). The Secret has to be in the namespace "+
+					"of the monitor, and is named without one", what, problems[0]))
+			// A mistake in the spec: looking again does not change it.
+			stop.requeueAfter = 0
+			return creds, stop
+		}
+		var secret corev1.Secret
+		err := r.Get(ctx, types.NamespacedName{Name: need.Name, Namespace: monitor.Namespace}, &secret)
+		switch {
+		case apierrors.IsNotFound(err):
+			return creds, unavailable(reasonSecretNotFound,
+				fmt.Sprintf("%s was not found in namespace %q", what, monitor.Namespace))
+		case err != nil:
+			stop := unavailable(reasonSecretReadFailed, fmt.Sprintf("%s could not be read: %v", what, err))
+			stop.requeueAfter = 0
+			stop.err = fmt.Errorf("read secret %q of %s: %w", need.Name, need.Field, err)
+			return creds, stop
+		}
+		// The Secret the operator generates for inline credentials goes
+		// when the monitor has none: a pod that mounts it would lose it.
+		if need.Name == builder.CredentialsSecretName(monitor.Name) && metav1.IsControlledBy(&secret, monitor) {
+			stop := unavailable(reasonGeneratedSecretReferenced, fmt.Sprintf(
+				"%s is the one the operator generates from inline credentials, and removes once a monitor has "+
+					"none. It cannot hold a certificate of the monitor: name a Secret of your own. Nothing is "+
+					"changed until then", what))
+			stop.requeueAfter = 0
+			return creds, stop
+		}
+		for _, key := range need.Keys {
+			if len(secret.Data[key]) == 0 {
+				return creds, unavailable(reasonSecretKeyMissing, fmt.Sprintf("%s has no value under key %q", what, key))
+			}
+		}
+		if err := need.CheckContent(secret.Data); err != nil {
+			return creds, unavailable(reasonInvalidCertificate, fmt.Sprintf("%s cannot be used: %v", what, err))
+		}
+		versions = append(versions, credentialsVersion(&secret))
+		if quoted := fmt.Sprintf("%q", need.Name); !slices.Contains(names, quoted) {
+			names = append(names, quoted)
+		}
+	}
+
+	// One token for everything the pod takes from Secrets. Each part is
+	// already one that says nothing about what a Secret holds.
+	sum := sha256.Sum256([]byte(strings.Join(versions, "/")))
+	creds.fromSecret, creds.version = true, hex.EncodeToString(sum[:8])
+	creds.message += "; certificates are mounted from " + strings.Join(names, ", ")
+	return creds, nil
 }
 
 // credentialsVersion returns a token that changes whenever the Secret object
