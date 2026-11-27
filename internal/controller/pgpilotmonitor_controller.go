@@ -67,6 +67,9 @@ const (
 	// reasonServiceMonitorAPIMissing: the cluster stopped serving
 	// ServiceMonitors while the operator ran.
 	reasonServiceMonitorAPIMissing = "ServiceMonitorAPIMissing"
+	// eventNamespaceTagReplaced is recorded for a monitor whose customTags
+	// name a namespace other than its own.
+	eventNamespaceTagReplaced = "NamespaceTagReplaced"
 	// eventScrapeTargetRemoved is recorded when the Service or the
 	// ServiceMonitor of a monitor is deleted because its Prometheus sink was
 	// turned off.
@@ -261,6 +264,15 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 		status.event(corev1.EventTypeNormal, "ConfigMapUpdated",
 			"ConfigMap %s reconciled (hash=%s)", desiredCM.Name, configHash[:12])
 		monitor.Status.ConfigHash = configHash
+		// Said where the configuration is announced, and so once for each
+		// change of it: the API server accepts the key, and nothing else
+		// tells the user that it is not what the series carry.
+		if claimed, set := monitor.Spec.Database.CustomTags[builder.NamespaceTag]; set && claimed != monitor.Namespace {
+			status.event(corev1.EventTypeWarning, eventNamespaceTagReplaced,
+				"spec.database.customTags.%s is %q, and is not used: the tag is the operator's and carries the "+
+					"namespace of the monitor, %q. Use another key for a value of your own",
+				builder.NamespaceTag, claimed, monitor.Namespace)
+		}
 	}
 
 	// --- Step 5: Build Deployment. ---

@@ -79,8 +79,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_db_size_size_b{dbname=~\"$dbname\"}",
-          "legendFormat": "{{dbname}}",
+          "expr": "pgwatch_db_size_size_b{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "{{namespace}}/{{dbname}}",
           "refId": "A"
         }
       ],
@@ -139,8 +139,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_backends_idleintransaction{dbname=~\"$dbname\"}",
-          "legendFormat": "{{dbname}}",
+          "expr": "pgwatch_backends_idleintransaction{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "{{namespace}}/{{dbname}}",
           "refId": "A"
         }
       ],
@@ -199,8 +199,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_backends_max_xmin_age_tx{dbname=~\"$dbname\"}",
-          "legendFormat": "{{dbname}}",
+          "expr": "pgwatch_backends_max_xmin_age_tx{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "{{namespace}}/{{dbname}}",
           "refId": "A"
         }
       ],
@@ -255,8 +255,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_db_stats_deadlocks{dbname=~\"$dbname\"}",
-          "legendFormat": "{{dbname}}",
+          "expr": "pgwatch_db_stats_deadlocks{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "{{namespace}}/{{dbname}}",
           "refId": "A"
         }
       ],
@@ -317,8 +317,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_backends_active{dbname=~\"$dbname\"}",
-          "legendFormat": "active {{dbname}}",
+          "expr": "pgwatch_backends_active{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "active {{namespace}}/{{dbname}}",
           "refId": "A"
         },
         {
@@ -326,8 +326,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_backends_idle{dbname=~\"$dbname\"}",
-          "legendFormat": "idle {{dbname}}",
+          "expr": "pgwatch_backends_idle{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "idle {{namespace}}/{{dbname}}",
           "refId": "B"
         },
         {
@@ -335,8 +335,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_backends_idleintransaction{dbname=~\"$dbname\"}",
-          "legendFormat": "idle-in-tx {{dbname}}",
+          "expr": "pgwatch_backends_idleintransaction{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "idle-in-tx {{namespace}}/{{dbname}}",
           "refId": "C"
         },
         {
@@ -344,8 +344,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_backends_waiting{dbname=~\"$dbname\"}",
-          "legendFormat": "waiting {{dbname}}",
+          "expr": "pgwatch_backends_waiting{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "waiting {{namespace}}/{{dbname}}",
           "refId": "D"
         }
       ],
@@ -391,8 +391,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (dbname, locktype) (pgwatch_locks_count{dbname=~\"$dbname\"})",
-          "legendFormat": "{{dbname}} {{locktype}}",
+          "expr": "sum by (namespace, dbname, locktype) (pgwatch_locks_count{namespace=~\"$namespace\", dbname=~\"$dbname\"})",
+          "legendFormat": "{{namespace}}/{{dbname}} {{locktype}}",
           "refId": "A"
         }
       ],
@@ -454,8 +454,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pgwatch_table_stats_seq_scan{dbname=~\"$dbname\"}[15m])",
-          "legendFormat": "{{dbname}} / {{table_name}}",
+          "expr": "rate(pgwatch_table_stats_seq_scan{namespace=~\"$namespace\", dbname=~\"$dbname\"}[15m])",
+          "legendFormat": "{{namespace}}/{{dbname}} / {{table_name}}",
           "refId": "A"
         }
       ],
@@ -505,8 +505,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pgwatch_table_stats_n_dead_tup{dbname=~\"$dbname\"}",
-          "legendFormat": "{{dbname}} / {{table_name}}",
+          "expr": "pgwatch_table_stats_n_dead_tup{namespace=~\"$namespace\", dbname=~\"$dbname\"}",
+          "legendFormat": "{{namespace}}/{{dbname}} / {{table_name}}",
           "refId": "A"
         }
       ],
@@ -556,8 +556,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "max_over_time(pgwatch_table_bloat_approx_summary_sql_approx_bloat_percentage{dbname=~\"$dbname\"}[3h])",
-          "legendFormat": "{{dbname}}",
+          "expr": "max_over_time(pgwatch_table_bloat_approx_summary_sql_approx_bloat_percentage{namespace=~\"$namespace\", dbname=~\"$dbname\"}[3h])",
+          "legendFormat": "{{namespace}}/{{dbname}}",
           "refId": "A"
         }
       ],
@@ -592,7 +592,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "max_over_time(pgwatch_index_stats_idx_scan{dbname=~\"$dbname\"}[30m]) == 0",
+          "expr": "max_over_time(pgwatch_index_stats_idx_scan{namespace=~\"$namespace\", dbname=~\"$dbname\"}[30m]) == 0",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -612,7 +612,7 @@
               "exported_instance": true,
               "container": true,
               "endpoint": true,
-              "namespace": true,
+              "exported_namespace": true,
               "pod": true,
               "service": true,
               "env": true,
@@ -679,7 +679,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, pgwatch_stat_statements_total_time{dbname=~\"$dbname\"})",
+          "expr": "topk(10, pgwatch_stat_statements_total_time{namespace=~\"$namespace\", dbname=~\"$dbname\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -699,7 +699,7 @@
               "exported_instance": true,
               "container": true,
               "endpoint": true,
-              "namespace": true,
+              "exported_namespace": true,
               "pod": true,
               "service": true,
               "env": true,
@@ -770,8 +770,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pgwatch_wal_xlog_location_b{dbname=~\"$dbname\"}[5m])",
-          "legendFormat": "{{dbname}}",
+          "expr": "rate(pgwatch_wal_xlog_location_b{namespace=~\"$namespace\", dbname=~\"$dbname\"}[5m])",
+          "legendFormat": "{{namespace}}/{{dbname}}",
           "refId": "A"
         }
       ],
@@ -817,8 +817,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pgwatch_bgwriter_checkpoints_timed{dbname=~\"$dbname\"}[5m])",
-          "legendFormat": "timed {{dbname}}",
+          "expr": "rate(pgwatch_bgwriter_checkpoints_timed{namespace=~\"$namespace\", dbname=~\"$dbname\"}[5m])",
+          "legendFormat": "timed {{namespace}}/{{dbname}}",
           "refId": "A"
         },
         {
@@ -826,8 +826,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pgwatch_bgwriter_checkpoints_req{dbname=~\"$dbname\"}[5m])",
-          "legendFormat": "requested {{dbname}}",
+          "expr": "rate(pgwatch_bgwriter_checkpoints_req{namespace=~\"$namespace\", dbname=~\"$dbname\"}[5m])",
+          "legendFormat": "requested {{namespace}}/{{dbname}}",
           "refId": "B"
         }
       ],
@@ -870,7 +870,33 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(pgwatch_db_size_size_b, dbname)",
+        "definition": "label_values(pgwatch_db_size_size_b, namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Namespace",
+        "multi": true,
+        "name": "namespace",
+        "options": [],
+        "query": {
+          "query": "label_values(pgwatch_db_size_size_b, namespace)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(pgwatch_db_size_size_b{namespace=~\"$namespace\"}, dbname)",
         "hide": 0,
         "includeAll": true,
         "label": "Monitor",
@@ -878,7 +904,7 @@
         "name": "dbname",
         "options": [],
         "query": {
-          "query": "label_values(pgwatch_db_size_size_b, dbname)",
+          "query": "label_values(pgwatch_db_size_size_b{namespace=~\"$namespace\"}, dbname)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -897,6 +923,6 @@
   "timezone": "browser",
   "title": "pgpilot-operator overview",
   "uid": "pgpilot-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

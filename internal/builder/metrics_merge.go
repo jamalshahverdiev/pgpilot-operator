@@ -19,10 +19,16 @@ type MergedMetrics struct {
 	// metrics that come from libraries or inline custom definitions.
 	Intervals map[string]int
 
+	// IntervalUnset names the metrics whose definition gives no interval.
+	// Intervals holds the default for them, which is what they are
+	// collected at unless they stand in for a metric of the preset, whose
+	// interval they then keep.
+	IntervalUnset map[string]bool
+
 	// Definitions holds the SQL definitions for custom metrics (from
 	// libraries and inline custom). These go into metrics.yaml.
-	// Built-in preset metrics are NOT included — pgwatch resolves them
-	// from its embedded metrics.yaml.
+	// Built-in preset metrics are NOT included: they are taken from the
+	// registry of the pgwatch release.
 	Definitions map[string]MetricDef
 }
 
@@ -42,15 +48,18 @@ type MetricDef struct {
 //  1. Metrics from referenced PgpilotMetricLibrary CRs (in order listed)
 //  2. Inline custom metrics from the monitor spec
 //
-// The preset is passed through as-is — pgwatch resolves it internally.
+// The preset is passed through as-is: its metrics are resolved from the
+// registry, by pgwatch or, next to metrics of the monitor's own, by
+// expandPresetIntoIntervals.
 func MergeMetrics(
 	spec pgpilotv1.MetricsSpec,
 	libraries []pgpilotv1.PgpilotMetricLibrary,
 ) MergedMetrics {
 	m := MergedMetrics{
-		Preset:      spec.Preset,
-		Intervals:   make(map[string]int),
-		Definitions: make(map[string]MetricDef),
+		Preset:        spec.Preset,
+		Intervals:     make(map[string]int),
+		IntervalUnset: make(map[string]bool),
+		Definitions:   make(map[string]MetricDef),
 	}
 
 	for _, lib := range libraries {
@@ -75,6 +84,13 @@ func addMetric(m *MergedMetrics, md pgpilotv1.MetricDefinition) {
 		interval = defaultInterval
 	}
 	m.Intervals[md.Name] = interval
+	// The later definition of a name replaces the earlier one whole,
+	// including whether it names an interval.
+	if md.Interval == nil {
+		m.IntervalUnset[md.Name] = true
+	} else {
+		delete(m.IntervalUnset, md.Name)
+	}
 
 	sqls := make(map[int]string, len(md.SQLs))
 	for verStr, sql := range md.SQLs {

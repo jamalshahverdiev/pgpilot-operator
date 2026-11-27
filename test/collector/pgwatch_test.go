@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,10 +44,11 @@ func defaultImage(t *testing.T) string {
 	return dep.Spec.Template.Spec.Containers[0].Image
 }
 
-// The operator hands its own copy of pgwatch's metric registry to the
-// collector, in place of the one inside the image. The two have to be the
-// same file, or a monitor would run one release's binary with another
-// release's SQL.
+// A monitor with metrics of its own is handed the operator's copy of
+// pgwatch's metric registry, in place of the one inside the image, and the
+// names of the presets are checked against that copy for every monitor. The
+// two have to be the same file, or a monitor would run one release's binary
+// with another release's SQL.
 func TestEmbeddedRegistryIsTheOneInsideTheDefaultImage(t *testing.T) {
 	image := defaultImage(t)
 	if want := builder.DefaultImageRepository + ":" + builder.PgwatchVersion; image != want {
@@ -111,8 +113,8 @@ func TestPresetOnly(t *testing.T) {
 	if !c.accepts(c.port) {
 		t.Errorf("the metrics port does not accept connections: the pod's probes would fail")
 	}
-	// Nothing but what the preset asks for: a registry handed over wrongly
-	// shows up as extra or missing metrics.
+	// Nothing but what the preset asks for: a preset resolved from another
+	// registry than the image's shows up as extra or missing metrics.
 	for _, name := range got.names("pgwatch_") {
 		known := false
 		for _, metric := range []string{"instance_up", "db_stats", "db_size", "wal", "exporter"} {
@@ -260,10 +262,15 @@ func registryPresets(t *testing.T) map[string]map[string]int {
 }
 
 // Every preset a monitor may use has to start, connect, resolve all its
-// metrics from the registry the operator ships and get an answer for each
-// from the server. Metrics that need an extension or a helper function fail
-// on a stock PostgreSQL, and are listed above; any other failure means the
-// SQL did not arrive the way pgwatch released it.
+// metrics and get an answer for each from the server. Metrics that need an
+// extension or a helper function fail on a stock PostgreSQL, and are listed
+// above; any other failure means the preset is not what the operator takes
+// it for.
+//
+// A monitor that only names a preset resolves it from the registry inside
+// the image. One with a metric of its own is handed the operator's rendering
+// of the registry, and the widest presets are run that way as well: that is
+// where every built-in statement the operator passes on is put to a server.
 func TestEveryPresetResolves(t *testing.T) {
 	presets, err := builder.Presets()
 	if err != nil {
@@ -273,10 +280,38 @@ func TestEveryPresetResolves(t *testing.T) {
 		t.Fatalf("only %d presets: %v", len(presets), presets)
 	}
 	members := registryPresets(t)
+	type run struct {
+		name, preset string
+		spec         pgpilotv1.MetricsSpec
+		rendered     bool
+	}
+	runs := make([]run, 0, len(presets)+2)
 	for _, preset := range presets {
-		t.Run(preset, func(t *testing.T) {
+		runs = append(runs, run{name: preset, preset: preset, spec: pgpilotv1.MetricsSpec{Preset: preset}})
+	}
+	for _, preset := range []string{"exhaustive", "debug"} {
+		if !slices.Contains(presets, preset) {
+			t.Fatalf("preset %s left the registry: pick another wide one", preset)
+		}
+		runs = append(runs, run{
+			name: preset + " from the operator's rendering", preset: preset, rendered: true,
+			spec: pgpilotv1.MetricsSpec{Preset: preset, Custom: []pgpilotv1.MetricDefinition{
+				{Name: "queue_depth", SQLs: map[string]string{"14": "SELECT 7 AS depth"}},
+			}},
+		})
+	}
+	for _, r := range runs {
+		preset := r.preset
+		t.Run(r.name, func(t *testing.T) {
 			t.Parallel()
-			monitor := newMonitor("preset-"+strings.ReplaceAll(preset, "_", "-"), pgpilotv1.MetricsSpec{Preset: preset})
+			if got := builder.NeedsMetricsFile(builder.MergeMetrics(r.spec, nil)); got != r.rendered {
+				t.Fatalf("the monitor is handed a metrics.yaml: %v, this run is about the other case", got)
+			}
+			suffix := ""
+			if r.rendered {
+				suffix = "-rendered"
+			}
+			monitor := newMonitor("preset-"+strings.ReplaceAll(preset, "_", "-")+suffix, r.spec)
 			c := startCollector(t, monitor, nil, defaultSecrets())
 
 			// Not every preset has instance_up (those for managed services
@@ -301,6 +336,8 @@ func TestEveryPresetResolves(t *testing.T) {
 			c.awaitFirstCollection()
 			for _, metric := range c.failedMetrics() {
 				if _, in := members[preset][metric]; !in {
+					// The monitor's own metric is not of the preset, and
+					// does not fail.
 					t.Errorf("pgwatch tried to fetch %q, which is not in preset %s", metric, preset)
 				}
 				if known, expected := cannotWorkOnAStockServer[metric]; !expected || serverMajor < known.from {
@@ -394,4 +431,60 @@ func TestWrongPasswordKeepsTheCollectorRunning(t *testing.T) {
 	if !strings.Contains(c.logs(), "password authentication failed") {
 		t.Errorf("the log does not name the failed login, which is what troubleshooting.md tells users to look for")
 	}
+}
+
+// A monitor that only names a preset runs on the registry inside its image,
+// whichever pgwatch release that is. pgwatch 5.1.0 collects the server
+// settings as one series per setting; from 6.0 on they are one series with
+// the setting as a label (see TestSettingsAreExportedByName). Handed the
+// operator's copy of the 6.2.0 registry, as every monitor was, a 5.1.0
+// collector exported them the new way.
+func TestAPinnedReleaseRunsOnItsOwnRegistry(t *testing.T) {
+	t.Parallel()
+	const pinned = "5.1.0"
+	if pinned == builder.PgwatchVersion {
+		t.Fatalf("the test needs a release other than the operator's own")
+	}
+
+	t.Run("with a preset alone", func(t *testing.T) {
+		t.Parallel()
+		monitor := newMonitor("pinned-preset", pgpilotv1.MetricsSpec{Preset: "exhaustive_no_python"})
+		monitor.Spec.Image.Tag = pinned
+		c := startCollector(t, monitor, nil, defaultSecrets())
+		if !strings.HasSuffix(c.image, ":"+pinned) {
+			t.Fatalf("the collector runs %s", c.image)
+		}
+		got := c.eventually("settings of the server, the way pgwatch "+pinned+" exports them", func(got samples) error {
+			if len(got.find("pgwatch_settings_max_connections", map[string]string{"dbname": monitor.Name})) != 1 {
+				return fmt.Errorf("no pgwatch_settings_max_connections")
+			}
+			return nil
+		})
+		if newer := got.find("pgwatch_settings_num_value", nil); len(newer) != 0 {
+			t.Errorf("pgwatch_settings_num_value is exported: the collector was handed the registry of %s",
+				builder.PgwatchVersion)
+		}
+	})
+
+	// With metrics of its own a monitor is handed a metrics.yaml, which
+	// takes the place of the registry in the image, and the built-in
+	// definitions in it are those of the operator's release. The docs say
+	// so, and that leaving the tag unset is the way to avoid it.
+	t.Run("with metrics of its own it is handed the operator's", func(t *testing.T) {
+		t.Parallel()
+		monitor := newMonitor("pinned-custom", pgpilotv1.MetricsSpec{
+			Preset: "exhaustive_no_python",
+			Custom: []pgpilotv1.MetricDefinition{{Name: "queue_depth", SQLs: map[string]string{"14": "SELECT 7 AS depth"}}},
+		})
+		monitor.Spec.Image.Tag = pinned
+		c := startCollector(t, monitor, nil, defaultSecrets())
+		what := "settings of the server, the way pgwatch " + builder.PgwatchVersion + " exports them"
+		c.eventually(what, func(got samples) error {
+			want := map[string]string{"dbname": monitor.Name, "name": "max_connections"}
+			if len(got.find("pgwatch_settings_num_value", want)) != 1 {
+				return fmt.Errorf(`no pgwatch_settings_num_value{name="max_connections"}`)
+			}
+			return nil
+		})
+	})
 }

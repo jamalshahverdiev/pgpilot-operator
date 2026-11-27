@@ -8,7 +8,7 @@ pgpilot-operator is a Kubernetes operator that manages [pgwatch v6](https://gith
 
 1. **One PgpilotMonitor = one pgwatch pod.** Even though pgwatch can monitor many databases from a single process, we use one pod per database for namespace isolation, small blast radius, and a simple mental model.
 
-2. **pgwatch runs in file-based (read-only) mode.** The operator generates `sources.yaml` and `metrics.yaml`, mounts them via a ConfigMap, and passes `--sources` / `--metrics` flags. pgwatch cannot mutate its own configuration.
+2. **pgwatch runs in file-based (read-only) mode.** The operator generates `sources.yaml` and, for a monitor with metric definitions of its own, `metrics.yaml`, mounts them via a ConfigMap, and passes `--sources` (and then `--metrics`). pgwatch cannot mutate its own configuration.
 
 3. **This operator only observes.** It does not act on metrics. Future action operators (bloat, advisor, emergency) are separate projects.
 
@@ -25,8 +25,8 @@ PgpilotMonitor CR
   │     (inline or Secret — exactly one)    │
   │  2. Resolve PgpilotMetricLibrary refs   │
   │  3. Merge metrics (preset + libs + custom) │
-  │  4. Generate ConfigMap (sources.yaml +  │
-  │     metrics.yaml + SHA-256 hash)        │
+  │  4. Generate ConfigMap (sources.yaml,   │
+  │     metrics.yaml if needed, SHA-256)    │
   │  5. Generate Deployment (1 replica)     │
   │  6. Generate Service (Prometheus sink)  │
   │  7. Generate ServiceMonitor (optional)  │
@@ -37,7 +37,7 @@ PgpilotMonitor CR
   ┌───────────────┐  ┌────────────────┐  ┌──────────┐  ┌────────────────┐
   │   ConfigMap   │  │  Deployment    │  │ Service  │  │ ServiceMonitor │
   │ sources.yaml  │  │  1 replica     │  │ :9187    │  │ (if prom-op)   │
-  │ metrics.yaml  │  │  pgwatch pod   │  │          │  │                │
+  │ (metrics.yaml)│  │  pgwatch pod   │  │          │  │                │
   └───────────────┘  └────────────────┘  └──────────┘  └────────────────┘
 ```
 
@@ -62,8 +62,14 @@ from the environment:
     metric_name: <interval_seconds>
   is_enabled: true
   custom_tags:
-    env: prod
+    env: prod                       # spec.database.customTags
+    namespace: <monitor-namespace>  # always, set by the operator
 ```
+
+The name of the source is the monitor's name; pgwatch exports it as the
+`dbname` label. The `namespace` tag tells two monitors of one name in two
+namespaces apart, and is the operator's: a `namespace` key in
+`spec.database.customTags` does not replace it.
 
 `PGUSER` / `PGPASSWORD` come from either:
 - inline `spec.database.username` / `password` (plain env values), or
@@ -71,20 +77,30 @@ from the environment:
 
 ### metrics.yaml
 
-Present whenever `spec.metrics` has either a preset or custom definitions
-(i.e. in almost all real cases). The operator embeds pgwatch's own
-`metrics.yaml` at build time via `go:embed`, merges user custom metrics
-on top, and emits the combined file — this is required because pgwatch's
-`--metrics <file>` flag **replaces** its built-in registry rather than
-merging, so a custom metrics.yaml without the built-in metric
-definitions would break preset resolution.
+Present only for a monitor with metric definitions of its own, inline or
+from a library, and only then is the collector started with `--metrics`. A
+monitor that just names a preset has no such file: its collector resolves the
+preset from the registry inside its image, the definitions that belong to the
+pgwatch release it runs.
+
+pgwatch's `--metrics <file>` flag **replaces** that registry rather than
+adding to it. For a monitor that combines a preset with metrics of its own,
+the file therefore has to hold everything: the operator embeds pgwatch's own
+`metrics.yaml` at build time via `go:embed`, hands every built-in metric and
+preset on as it is written there, and puts the monitor's definitions on top
+(a definition with the name of a built-in metric replaces it).
 
 The embedded file is the unmodified registry of one pgwatch release, the same
 release whose image a monitor runs by default
 (`internal/builder/pgwatchdata/VERSION`; `make update-pgwatch-registry` fetches
-another one). A monitor that pins an older `spec.image.tag` still receives this
-registry: the two are meant to be used together, which is why leaving the tag
-unset is the recommended setting.
+another one). A monitor that combines a preset with metrics of its own and
+pins another `spec.image.tag` still receives this registry: the two are meant to be used
+together, which is why leaving the tag unset is the recommended setting. The
+names of the presets are checked against this registry for every monitor.
+
+In `sources.yaml` such a monitor lists its preset's metrics one by one, at the
+preset's intervals, next to its own. A metric of its own that replaces one of
+the preset keeps the preset's interval unless its definition names one.
 
 ```yaml
 metrics:
@@ -96,7 +112,7 @@ metrics:
     gauges: ["*"]
     is_instance_level: false
 presets:
-  # All built-in presets, shipped so preset_metrics still resolves.
+  # All built-in presets, as the release ships them.
   exhaustive:
     description: ...
     metrics:
@@ -176,11 +192,12 @@ The selected **preset** is then combined with the above depending on what's
 present:
 
 - **Preset only** (no custom): `preset_metrics: <name>` is set in
-  sources.yaml; pgwatch resolves it from its metrics.yaml
+  sources.yaml; pgwatch resolves it from the registry inside its image
 - **Custom only** (no preset): `custom_metrics: {...}` is set
 - **Both preset + custom**: the operator expands the preset's metric list
-  into `custom_metrics` (user intervals override preset intervals on name
-  collision) and **does not** set `preset_metrics`. pgwatch's
+  into `custom_metrics` (on a name collision an interval the definition
+  names overrides the preset's; a definition without one keeps the
+  preset's) and **does not** set `preset_metrics`. pgwatch's
   preset-resolution code would otherwise silently overwrite
   `custom_metrics`, losing the user's definitions.
 

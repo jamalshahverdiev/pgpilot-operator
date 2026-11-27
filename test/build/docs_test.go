@@ -18,9 +18,11 @@ package build
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -155,5 +157,74 @@ func TestChangelog_UpgradeCheckCommandFindsAffectedObjects(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("the command reported:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The example dashboard is what most users start from. A monitor is known by
+// its namespace and its name together; a query that selects or groups by the
+// name alone draws two monitors of one name as one.
+func TestDashboard_TellsMonitorsApartByNamespace(t *testing.T) {
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+			Transformations []struct {
+				Options struct {
+					ExcludeByName map[string]bool `json:"excludeByName"`
+				} `json:"options"`
+			} `json:"transformations"`
+		} `json:"panels"`
+		Templating struct {
+			List []struct {
+				Name string `json:"name"`
+			} `json:"list"`
+		} `json:"templating"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "examples/grafana/pgpilot-overview.json")), &dashboard); err != nil {
+		t.Fatal(err)
+	}
+
+	variables := make([]string, 0, len(dashboard.Templating.List))
+	for _, v := range dashboard.Templating.List {
+		variables = append(variables, v.Name)
+	}
+	at := func(name string) int { return slices.Index(variables, name) }
+	if at("namespace") < 0 || at("dbname") < 0 || at("namespace") > at("dbname") {
+		t.Errorf("variables %v: want namespace, and before dbname, which is chosen within it", variables)
+	}
+
+	grouping := regexp.MustCompile(`by \(([^)]*)\)`)
+	exprs := 0
+	for _, panel := range dashboard.Panels {
+		for _, target := range panel.Targets {
+			if target.Expr == "" {
+				continue
+			}
+			exprs++
+			if !strings.Contains(target.Expr, `namespace=~"$namespace"`) ||
+				!strings.Contains(target.Expr, `dbname=~"$dbname"`) {
+				t.Errorf("panel %q: %s does not select by namespace and dbname", panel.Title, target.Expr)
+			}
+			for _, by := range grouping.FindAllStringSubmatch(target.Expr, -1) {
+				if strings.Contains(by[1], "dbname") && !strings.Contains(by[1], "namespace") {
+					t.Errorf("panel %q groups by (%s): two monitors of one name become one", panel.Title, by[1])
+				}
+			}
+		}
+		// A table shows every label as a column. The namespace is one to
+		// show; a scraper that sets its own leaves pgwatch's behind as
+		// exported_namespace, which is one to hide.
+		for _, transformation := range panel.Transformations {
+			hidden := transformation.Options.ExcludeByName
+			if hidden != nil && (!hidden["exported_namespace"] || hidden["namespace"]) {
+				t.Errorf("panel %q hides %v", panel.Title, hidden)
+			}
+		}
+	}
+	if exprs < 10 {
+		t.Errorf("only %d queries were looked at: has the dashboard changed its shape?", exprs)
 	}
 }

@@ -106,6 +106,9 @@ type DatabaseRef struct {
 	// rejected: an empty key, a key starting with `__` (reserved by
 	// Prometheus; pgwatch then fails to export every series of the
 	// database) and `dbname`, which pgwatch sets to the monitor name.
+	//
+	// The operator adds the tag `namespace`, the namespace of the monitor,
+	// to every source. A `namespace` key set here is replaced by it.
 	// +kubebuilder:validation:MaxProperties=32
 	// +kubebuilder:validation:XValidation:rule="self.all(k, size(k) > 0 && !k.startsWith('__') && k != 'dbname')",message="customTags keys must not be empty, must not start with __ and must not be dbname"
 	// +optional
@@ -265,8 +268,9 @@ type ImageSpec struct {
 
 	// tag of the pgwatch image. Leave empty to run the pgwatch release this
 	// operator version is built for; that is the recommended setting, since
-	// the metric definitions the operator hands to the collector come from
-	// that release. A tag set here is kept across operator upgrades.
+	// the names of the presets are checked against that release, and the
+	// metric definitions the operator hands to a collector with metrics of
+	// its own come from it. A tag set here is kept across operator upgrades.
 	// +optional
 	Tag string `json:"tag,omitempty"`
 

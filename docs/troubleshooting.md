@@ -532,6 +532,9 @@ missing).
   [Collector still runs an old pgwatch](#collector-still-runs-an-old-pgwatch-after-an-operator-upgrade)
 - `Warning/PodNotReady` — the pod of a monitor that was ready is no longer
   available
+- `Warning/NamespaceTagReplaced` — `spec.database.customTags` has a `namespace`
+  key with another value than the monitor's namespace. The tag is the
+  operator's; the value is not used. Use another key
 - `Normal/ScrapeTargetRemoved` — the Service or the ServiceMonitor of a
   monitor was deleted because its Prometheus sink is off
 - `Warning/ServiceMonitorAPIMissing` — see

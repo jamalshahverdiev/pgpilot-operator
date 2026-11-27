@@ -209,23 +209,42 @@ func TestBuildDeployment_Args_GRPCSink(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_Args_MetricsFile_WhenPresetOrCustom(t *testing.T) {
-	monitor := newTestMonitor()
-
-	// No preset, no custom → no --metrics arg.
-	merged := MergedMetrics{}
-	dep := BuildDeployment(monitor, merged, PodTemplateVersions{Config: "h"})
-	for _, a := range dep.Spec.Template.Spec.Containers[0].Args {
-		if a == "--metrics" {
-			t.Error("--metrics arg should not be present with empty merged")
-		}
-	}
-
-	// Preset alone → --metrics arg present (we ship the built-in registry).
-	merged = MergedMetrics{Preset: "basic"}
-	dep = BuildDeployment(monitor, merged, PodTemplateVersions{Config: "h"})
-	if !slices.Contains(dep.Spec.Template.Spec.Containers[0].Args, "--metrics") {
-		t.Error("--metrics arg should be present when preset is set")
+// --metrics puts a file in the place of the registry inside the image. The
+// flag and the file go together: BuildConfigMap decides by the same rule.
+func TestBuildDeployment_Args_MetricsFileOnlyForMetricsOfTheMonitorsOwn(t *testing.T) {
+	definition := map[string]MetricDef{"queue_depth": {SQLs: map[int]string{14: "SELECT 1"}}}
+	intervals := map[string]int{"queue_depth": 60}
+	for name, tc := range map[string]struct {
+		merged MergedMetrics
+		want   bool
+	}{
+		"nothing":              {MergedMetrics{}, false},
+		"a preset alone":       {MergedMetrics{Preset: "basic"}, false},
+		"metrics of its own":   {MergedMetrics{Intervals: intervals, Definitions: definition}, true},
+		"a preset and its own": {MergedMetrics{Preset: "basic", Intervals: intervals, Definitions: definition}, true},
+		// Not something MergeMetrics produces. The definitions are what
+		// the file is made of, so they decide.
+		"intervals without definitions": {MergedMetrics{Preset: "basic", Intervals: intervals}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			monitor := newTestMonitor()
+			args := BuildDeployment(monitor, tc.merged, PodTemplateVersions{Config: "h"}).Spec.Template.Spec.Containers[0].Args
+			at := slices.Index(args, "--metrics")
+			if (at >= 0) != tc.want {
+				t.Fatalf("args %q, want --metrics: %v", args, tc.want)
+			}
+			if tc.want && (at+1 >= len(args) || args[at+1] != "/etc/pgwatch/metrics.yaml") {
+				t.Errorf("args %q: --metrics does not point at the mounted file", args)
+			}
+			cm, _, err := BuildConfigMap(monitor, tc.merged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, file := cm.Data[MetricsKey]; file != tc.want {
+				t.Errorf("the flag is %v and the file is %v: the collector would be pointed at a file that is not there, "+
+					"or not at the one that is", tc.want, file)
+			}
+		})
 	}
 }
 

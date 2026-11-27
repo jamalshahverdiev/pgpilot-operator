@@ -44,7 +44,7 @@ hack/monitoring/setup.sh teardown
 ## Dashboard
 
 The imported dashboard has five row-groups, all driven by labels our operator
-emits (`dbname`, `env`, `instance`, `table_name`, `query`, `locktype`):
+emits (`namespace`, `dbname`, `env`, `instance`, `table_name`, `query`, `locktype`):
 
 - **Overview** — DB size, idle-in-transaction, xmin age, deadlocks
 - **Backends & Locks** — connection state over time, locks by type

@@ -24,8 +24,8 @@ const (
 )
 
 // BuildConfigMap creates the ConfigMap that pgwatch mounts as its
-// configuration. It contains sources.yaml (connection + intervals) and
-// optionally metrics.yaml (custom SQL definitions).
+// configuration. It contains sources.yaml (connection + intervals) and, for
+// a monitor that defines metrics of its own, metrics.yaml.
 //
 // The returned string is the SHA-256 hash of the combined data, used as
 // the pgpilot.io/config-hash annotation on the Deployment pod template to
@@ -50,10 +50,11 @@ func BuildConfigMap(
 		SourcesKey: sourcesYAML,
 	}
 
-	// We emit metrics.yaml when the user has a preset (so we can ship the
-	// full built-in registry alongside any custom metrics) or when they
-	// have custom definitions to inject.
-	if merged.Preset != "" || len(merged.Definitions) > 0 {
+	// metrics.yaml takes the place of the registry inside the image. A
+	// monitor that only names a preset needs none, and is better off
+	// without: it then runs on the definitions of the pgwatch release its
+	// image holds, whichever that is, and its ConfigMap stays small.
+	if NeedsMetricsFile(merged) {
 		metricsYAML, err := renderMetrics(merged)
 		if err != nil {
 			return nil, "", fmt.Errorf("render metrics.yaml: %w", err)
@@ -95,7 +96,7 @@ func renderSources(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) (str
 		ConnStr:    connStr,
 		Kind:       "postgres",
 		IsEnabled:  true,
-		CustomTags: db.CustomTags,
+		CustomTags: sourceTags(monitor),
 	}
 
 	// pgwatch's source resolution logic sets md.Metrics = GetPresetMetrics(preset)
@@ -105,10 +106,10 @@ func renderSources(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) (str
 	// To support preset + custom together we expand the preset ourselves into
 	// custom_metrics (preset's metric intervals + user's custom intervals) and
 	// skip preset_metrics. When only preset is set, we use preset_metrics as-is
-	// so pgwatch can use its embedded metrics.yaml without extra work.
+	// and pgwatch resolves it from the registry inside its image.
 	switch {
 	case merged.Preset != "" && len(merged.Intervals) > 0:
-		expanded, err := expandPresetIntoIntervals(merged.Preset, merged.Intervals)
+		expanded, err := expandPresetIntoIntervals(merged)
 		if err != nil {
 			return "", err
 		}
@@ -124,6 +125,24 @@ func renderSources(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) (str
 		return "", err
 	}
 	return string(out), nil
+}
+
+// NamespaceTag is the custom tag that carries the namespace of the monitor.
+// pgwatch turns custom tags into labels of every series, and into fields of
+// what it sends to a gRPC receiver.
+const NamespaceTag = "namespace"
+
+// sourceTags returns the custom tags of the source: the monitor's own, and
+// its namespace. The name of the source, which becomes the dbname label, is
+// the name of the monitor alone, and two monitors of one name in two
+// namespaces are otherwise one database to whatever receives their
+// measurements. The tag is the operator's: a namespace a monitor claims for
+// itself in customTags does not replace the one it is in.
+func sourceTags(monitor *pgpilotv1.PgpilotMonitor) map[string]string {
+	tags := make(map[string]string, len(monitor.Spec.Database.CustomTags)+1)
+	maps.Copy(tags, monitor.Spec.Database.CustomTags)
+	tags[NamespaceTag] = monitor.Namespace
+	return tags
 }
 
 func buildConnStr(db pgpilotv1.DatabaseRef) string {
@@ -153,54 +172,63 @@ func buildConnStr(db pgpilotv1.DatabaseRef) string {
 
 // pgwatch metrics.yaml top-level structure.
 // Uses yaml tags (not json) because renderMetrics uses gopkg.in/yaml.v3 directly.
+// A metric is a pgwatchMetric for one of the monitor's own and a *yaml.Node
+// for a built-in one, a preset is always a *yaml.Node.
 type pgwatchMetricsFile struct {
-	Metrics map[string]pgwatchMetric `yaml:"metrics,omitempty"`
-	Presets map[string]pgwatchPreset `yaml:"presets,omitempty"`
+	Metrics map[string]any          `yaml:"metrics,omitempty"`
+	Presets map[string]*yamlv3.Node `yaml:"presets,omitempty"`
 }
 
+// pgwatchMetric is a metric definition of a monitor or a library, as pgwatch
+// reads it. Built-in definitions do not pass through this struct.
 type pgwatchMetric struct {
-	InitSQL         string         `yaml:"init_sql,omitempty"`
 	SQLs            map[int]string `yaml:"sqls"`
 	Gauges          []string       `yaml:"gauges,omitempty"`
 	IsInstanceLevel bool           `yaml:"is_instance_level,omitempty"`
 	NodeStatus      string         `yaml:"node_status,omitempty"`
-	StorageName     string         `yaml:"storage_name,omitempty"`
 	Description     string         `yaml:"description,omitempty"`
 }
 
+// pgwatchPreset is what the operator reads of a preset: what it collects,
+// and how often. A preset is written out as the registry has it, not through
+// this struct.
 type pgwatchPreset struct {
-	Description string         `yaml:"description,omitempty"`
-	Metrics     map[string]int `yaml:"metrics"`
+	Metrics map[string]int `yaml:"metrics"`
+}
+
+// NeedsMetricsFile reports whether a monitor is given a metrics.yaml, and the
+// collector the --metrics flag that points at it: when it has metric
+// definitions of its own.
+func NeedsMetricsFile(merged MergedMetrics) bool {
+	return len(merged.Definitions) > 0
 }
 
 // renderMetrics builds the pgwatch metrics.yaml. When a preset is selected
 // alongside custom metrics, we must ship pgwatch's entire built-in metric +
 // preset registry because the --metrics flag REPLACES rather than merges with
-// pgwatch's embedded defaults. The embedded builtin covers this.
+// pgwatch's embedded defaults: the source lists the preset's metrics by name
+// (see renderSources), and without the built-in definitions pgwatch would
+// find none for them.
 func renderMetrics(merged MergedMetrics) (string, error) {
-	metrics := map[string]pgwatchMetric{}
-	presets := map[string]pgwatchPreset{}
+	metrics := map[string]any{}
+	var presets map[string]*yamlv3.Node
 
 	// Start from the embedded pgwatch built-in registry when a preset is
-	// requested — otherwise the preset would resolve to no metrics.
+	// requested: its metrics need their definitions.
 	if merged.Preset != "" {
-		bm, bp, err := loadBuiltinMetrics()
+		registry, err := loadBuiltinRegistry()
 		if err != nil {
 			return "", err
 		}
-		maps.Copy(metrics, bm)
-		maps.Copy(presets, bp)
+		for name, definition := range registry.metrics {
+			metrics[name] = definition
+		}
+		presets = registry.presetNodes
 	}
 
 	// Merge user custom definitions on top (override by name).
 	for name, def := range merged.Definitions {
-		metrics[name] = pgwatchMetric{
-			SQLs:            def.SQLs,
-			Gauges:          def.Gauges,
-			IsInstanceLevel: def.IsInstanceLevel,
-			NodeStatus:      def.NodeStatus,
-			Description:     def.Description,
-		}
+		metrics[name] = pgwatchMetric(def)
 	}
 
 	mf := pgwatchMetricsFile{Metrics: metrics, Presets: presets}

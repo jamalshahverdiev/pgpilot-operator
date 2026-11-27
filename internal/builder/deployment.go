@@ -199,7 +199,8 @@ func buildArgs(monitor *pgpilotv1.PgpilotMonitor, merged MergedMetrics) []string
 		webDisableArg,
 	}
 
-	if merged.Preset != "" || len(merged.Definitions) > 0 {
+	// Without the flag the collector uses the registry inside its image.
+	if NeedsMetricsFile(merged) {
 		args = append(args, "--metrics", configMountPath+"/"+MetricsKey)
 	}
 

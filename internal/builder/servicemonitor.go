@@ -10,6 +10,10 @@ import (
 // BuildServiceMonitor creates a prometheus-operator ServiceMonitor that
 // scrapes the pgwatch metrics Service. This should only be called when
 // the monitoring.coreos.com/v1 CRD is present in the cluster.
+// exportedNamespaceLabel is what Prometheus calls a scraped namespace label
+// on a target that has one of its own.
+const exportedNamespaceLabel = "exported_" + NamespaceTag
+
 func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.ServiceMonitor {
 	name := ResourceName(monitor.Name)
 	sysLabels := SystemLabels(monitor.Name)
@@ -44,6 +48,23 @@ func BuildServiceMonitor(monitor *pgpilotv1.PgpilotMonitor) *monitoringv1.Servic
 					// What the default costs is that a metric collected
 					// less often than every five minutes has gaps; see
 					// docs/observability.md for how to query those.
+					//
+					// Every series carries the namespace of its monitor
+					// as a label of pgwatch's own (NamespaceTag). The
+					// target has a namespace label already, so Prometheus
+					// keeps the scraped one as exported_namespace: the
+					// same value a second time on every series. It is
+					// emptied, which removes it, where it says what the
+					// target says and only there. A metric with a
+					// tag_namespace column has that column in the label
+					// instead, the one thing that tells its rows apart.
+					MetricRelabelConfigs: []monitoringv1.RelabelConfig{{
+						SourceLabels: []monitoringv1.LabelName{exportedNamespaceLabel},
+						Regex:        monitor.Namespace,
+						TargetLabel:  exportedNamespaceLabel,
+						Replacement:  new(""),
+						Action:       "replace",
+					}},
 				},
 			},
 		},

@@ -79,3 +79,34 @@ func TestBuildServiceMonitor_Labels_MergeServiceMetadata(t *testing.T) {
 		t.Error("system label missing from ServiceMonitor")
 	}
 }
+
+// pgwatch labels every series with the namespace of its monitor. The target
+// has that label already; the scraped one would be kept as
+// exported_namespace on every series, and is removed where it only repeats
+// the target's. A metric with a tag_namespace column carries that column's
+// value there: it must stay, or the rows of the metric become one series.
+func TestBuildServiceMonitor_RemovesTheNamespaceLabelOnlyWhereItRepeatsTheTargets(t *testing.T) {
+	monitor := newTestMonitor()
+	relabel := BuildServiceMonitor(monitor).Spec.Endpoints[0].MetricRelabelConfigs
+	if len(relabel) != 1 {
+		t.Fatalf("metricRelabelings: %+v", relabel)
+	}
+	rule := relabel[0]
+	if rule.Action != "replace" || len(rule.SourceLabels) != 1 || rule.SourceLabels[0] != "exported_namespace" ||
+		rule.TargetLabel != "exported_namespace" || rule.Replacement == nil || *rule.Replacement != "" {
+		t.Errorf("the rule does not empty exported_namespace: %+v", rule)
+	}
+	// Prometheus anchors the expression; a namespace is a DNS label and
+	// holds nothing an expression would read as more than itself.
+	if rule.Regex != testMonitorNS || rule.Separator != nil || rule.Modulus != 0 {
+		t.Errorf("the rule applies to %q, want the monitor's namespace %q alone", rule.Regex, testMonitorNS)
+	}
+	other := newTestMonitor()
+	other.Namespace = "another"
+	if got := BuildServiceMonitor(other).Spec.Endpoints[0].MetricRelabelConfigs[0].Regex; got != "another" {
+		t.Errorf("a monitor in another namespace: regex %q", got)
+	}
+	if NamespaceTag != "namespace" {
+		t.Errorf("the tag is %q; the rule above and the docs name the label namespace", NamespaceTag)
+	}
+}
