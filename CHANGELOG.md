@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### A ConfigMap for each configuration
+
+- The ConfigMap of a monitor is no longer changed in place. Each rendered
+  configuration gets a ConfigMap of its own, named after the hash of its
+  content (`pgpilot-<monitor>-config-<hash>`), and each pod template mounts
+  the one it was made for. pgwatch reads its files again every two minutes,
+  and the pod of the previous configuration runs until its successor is
+  available: with one ConfigMap for both it was handed the successor's
+  configuration, which could name certificate files it never mounted or
+  leave it without the `metrics.yaml` its arguments pointed at. It stopped
+  collecting exactly when the new pod could not start, which is when the old
+  one is all there is.
+- The ConfigMaps are immutable: the API server refuses a change to their
+  content.
+- The ConfigMaps of earlier configurations are removed once the rollout is
+  complete and nothing mounts them any more (`ConfigMapRemoved` event).
+
+Upgrade notes:
+
+- The ConfigMap of earlier releases, `pgpilot-<monitor>-config`, is left as
+  it is while the pod that mounts it runs, and removed after the rollout that
+  the upgrade causes. Anything that reads the ConfigMap by that name has to
+  find it another way: `kubectl get configmap -l pgpilot.io/monitor=<name>`,
+  or the hash in `status.configHash`.
+- **A monitor needs room for two ConfigMaps while a change rolls out**, and
+  the upgrade is such a change for every monitor at once. In a namespace
+  whose ResourceQuota limits `configmaps` and has no room, the new ConfigMap
+  cannot be created: the monitor reports `ApplyFailed` with `exceeded quota`
+  and its collector goes on as it was. Raise the quota by one for each
+  monitor before upgrading.
+- A ConfigMap of your own under a name of the form
+  `pgpilot-<monitor>-config-<ten hex characters>` is never touched; if the
+  operator needs that very name, the monitor reports `NameConflict`.
+- After a downgrade the earlier release writes `pgpilot-<monitor>-config`
+  again and leaves the hash-named ConfigMaps behind. They belong to the
+  monitor and go with it, or can be deleted by hand.
+
 ### TLS certificates
 
 - `spec.database.tls` names the certificates for the connection to the
@@ -52,11 +89,9 @@ Upgrade notes:
 - An `endpoint` of the gRPC sink that carries `?sslrootca=<file>` itself,
   which was the only way to get TLS, keeps working as long as
   `tls.caSecretRef` is not set; once it is, the Secret is what counts.
-- Adding certificates to a monitor that runs replaces its pod. If the new
-  pod cannot start, the old one stops collecting after a few minutes: the
-  connection string, which both read, then names files only the new pod has.
-  See "Adding certificates to a running monitor" in
-  `docs/troubleshooting.md`.
+- Adding certificates to a monitor that runs replaces its pod, and the pod
+  it replaces keeps collecting, without them, until the new one is
+  available.
 - Monitors without certificates are rendered as before; their collectors are
   not restarted by this change.
 - No change to the operator's role: the Secrets are read with the `get` it
@@ -222,15 +257,9 @@ Upgrade notes:
   generated configuration of every monitor changes.
 - **Make the new image pullable before upgrading** (mirror
   `cybertecpostgresql/pgwatch:6.2.0` first where the cluster cannot reach
-  it). The `metrics.yaml` of a monitor that only names a preset is gone
-  from its ConfigMap as soon as the operator is upgraded, while the pod of
-  the previous release was started with `--metrics` pointing at it. That pod
-  goes on collecting from what it has loaded, but only until its container
-  is next started (a node drain, an out-of-memory kill): then it finds no
-  definitions, stays up, passes its probes and collects nothing. Normally
-  the new pod has replaced it by then; where the new pod cannot start, the
-  monitor reports why (`ImagePullBackOff`, ...), and that is the time to
-  act.
+  it). Until the new pod can start, the collector of the previous release
+  goes on as it was, on the ConfigMap it was started with, and the monitor
+  reports why it is not ready (`ImagePullBackOff`, ...).
 - Scraped through the generated ServiceMonitor, the series end up as they
   were. Until Prometheus has loaded the changed ServiceMonitor, the first
   scrapes of a new pod are stored with an extra `exported_namespace` label;
@@ -317,7 +346,7 @@ Upgrade notes:
   When it starts, the operator takes `pgpilot.io/finalizer` off the monitors
   that still carry it; a monitor that is being deleted is let go at once.
 - An object that already carries the name of a generated one (`pgpilot-<name>`,
-  `pgpilot-<name>-config`, `pgpilot-<name>-credentials`) and is not the
+  `pgpilot-<name>-config-<hash>`, `pgpilot-<name>-credentials`) and is not the
   monitor's is left alone.
   The monitor reports `NameConflict` and names the object. Such an object
   used to be overwritten, given the monitor as its owner and deleted together

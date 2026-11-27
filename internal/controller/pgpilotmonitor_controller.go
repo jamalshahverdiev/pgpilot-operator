@@ -76,6 +76,9 @@ const (
 	// ServiceMonitor of a monitor is deleted because its Prometheus sink was
 	// turned off.
 	eventScrapeTargetRemoved = "ScrapeTargetRemoved"
+	// eventConfigMapRemoved is recorded when the ConfigMap of an earlier
+	// configuration is removed, once no pod reads it any more.
+	eventConfigMapRemoved = "ConfigMapRemoved"
 	// eventCredentialsSecretRemoved is recorded when the Secret generated
 	// from inline credentials is deleted because the monitor no longer has
 	// any.
@@ -338,7 +341,65 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 			out.err = stop.err
 		}
 	}
+
+	// --- Step 9: The ConfigMaps of the configurations the monitor had before. ---
+	// For the same reason not before the rollout is complete: the pod of
+	// the previous template mounts the ConfigMap of its own configuration.
+	if ready {
+		if err := r.removeEarlierConfigMaps(ctx, monitor, desiredCM.Name); err != nil {
+			out.err = errors.Join(out.err, err)
+		}
+	}
 	return out
+}
+
+// removeEarlierConfigMaps deletes the ConfigMaps of the monitor that hold a
+// configuration other than the current one: those of earlier configurations,
+// and the single ConfigMap of earlier releases. Only what the monitor
+// controls and what carries one of its names goes; the cache holds all of
+// those. Called once nothing mounts them any more.
+func (r *PgpilotMonitorReconciler) removeEarlierConfigMaps(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+	current string,
+) error {
+	var list corev1.ConfigMapList
+	if err := r.List(ctx, &list,
+		client.InNamespace(monitor.Namespace),
+		client.MatchingLabels{builder.LabelMonitorName: monitor.Name},
+	); err != nil {
+		return fmt.Errorf("list the configmaps of the monitor, to remove those of earlier configurations: %w", err)
+	}
+	var failed []error
+	for i := range list.Items {
+		earlier := &list.Items[i]
+		if earlier.Name == current || !builder.IsConfigMapName(monitor.Name, earlier.Name) ||
+			!metav1.IsControlledBy(earlier, monitor) {
+			continue
+		}
+		// Already told to go, and held by a finalizer of someone else's:
+		// asking again changes nothing and would be reported each time.
+		if !earlier.DeletionTimestamp.IsZero() {
+			continue
+		}
+		// Only the object that was looked at: one created under the name
+		// since is not this one.
+		uid := earlier.UID
+		err := r.Delete(ctx, earlier, client.Preconditions{UID: &uid})
+		switch {
+		case err == nil:
+			why := "it holds an earlier configuration, and no pod reads it any more"
+			logf.FromContext(ctx).Info("removed a generated object that is no longer wanted",
+				"kind", "ConfigMap", "name", earlier.Name, "because", why)
+			r.Recorder.Eventf(monitor, corev1.EventTypeNormal, eventConfigMapRemoved,
+				"ConfigMap %s removed: %s", earlier.Name, why)
+		case apiIsGone(err):
+			// The cache is behind: it was removed at an earlier look.
+		default:
+			failed = append(failed, fmt.Errorf("remove configmap %s: %w", earlier.Name, err))
+		}
+	}
+	return errors.Join(failed...)
 }
 
 // nextLookAtAHealthyMonitor says when a monitor whose collector runs is to be

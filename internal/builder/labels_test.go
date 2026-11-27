@@ -25,7 +25,7 @@ func TestValidateMonitorName(t *testing.T) {
 		if problems := validation.IsDNS1035Label(ResourceName(name)); len(problems) > 0 {
 			t.Errorf("%q gives the Service name %q: %v", name, ResourceName(name), problems)
 		}
-		configMap := ResourceName(name) + "-config"
+		configMap := ConfigMapName(name, strings.Repeat("f", 64))
 		if problems := validation.IsDNS1123Subdomain(configMap); len(problems) > 0 {
 			t.Errorf("%q gives the ConfigMap name %q: %v", name, configMap, problems)
 		}

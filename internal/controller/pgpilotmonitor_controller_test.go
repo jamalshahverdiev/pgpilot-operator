@@ -153,12 +153,10 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		It("should create ConfigMap, Deployment, and Service", func() {
 			createForSpec(monitor)
 
-			cmKey := types.NamespacedName{
-				Name:      builder.ResourceName("test-db") + "-config",
-				Namespace: ns.Name,
-			}
+			monitorKey := types.NamespacedName{Name: "test-db", Namespace: ns.Name}
 			Eventually(func() error {
-				return k8sClient.Get(context.TODO(), cmKey, &corev1.ConfigMap{})
+				_, err := mountedConfigMap(k8sClient, monitorKey)
+				return err
 			}, timeout, interval).Should(Succeed())
 
 			depKey := types.NamespacedName{
@@ -278,13 +276,10 @@ var _ = Describe("PgpilotMonitor Controller", func() {
 		It("should set OwnerReference on child resources", func() {
 			createForSpec(monitor)
 
-			cmKey := types.NamespacedName{
-				Name:      builder.ResourceName("test-db") + "-config",
-				Namespace: ns.Name,
-			}
+			monitorKey := types.NamespacedName{Name: "test-db", Namespace: ns.Name}
 			Eventually(func() bool {
-				var cm corev1.ConfigMap
-				if err := k8sClient.Get(context.TODO(), cmKey, &cm); err != nil {
+				cm, err := mountedConfigMap(k8sClient, monitorKey)
+				if err != nil {
 					return false
 				}
 				for _, ref := range cm.OwnerReferences {

@@ -399,9 +399,9 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 			Expect(ready.Message).To(ContainSubstring(
 				`PgpilotMetricLibrary old-rules cannot be used: metric "queue_depth": sqls key "*" is not a PostgreSQL major version`))
 
-			err = c.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-uses-old-rules-config", Namespace: libraryNS},
-				&corev1.ConfigMap{})
-			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a ConfigMap rendered from that definition: %v", err)
+			rendered, err := configMapNames(c, monitorKey)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rendered).To(BeEmpty(), "a ConfigMap rendered from that definition")
 		})
 
 		It("is reported by the library itself where the API server lets its status be written", func() {
@@ -442,9 +442,9 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 				_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{NamespacedName: key})
 				Expect(drain(recorder)).To(
 					ConsistOf(HavePrefix("Warning InvalidMetric spec.metrics.custom cannot be used: "+problem)), name)
-				err2 := c.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-" + name + "-config", Namespace: libraryNS},
-					&corev1.ConfigMap{})
-				Expect(apierrors.IsNotFound(err2)).To(BeTrue(), "%s: a ConfigMap rendered from that definition: %v", name, err2)
+				rendered, err2 := configMapNames(c, key)
+				Expect(err2).NotTo(HaveOccurred())
+				Expect(rendered).To(BeEmpty(), "%s: a ConfigMap rendered from that definition", name)
 
 				var monitor pgpilotv1.PgpilotMonitor
 				Expect(c.Get(context.TODO(), key, &monitor)).To(Succeed())
@@ -480,9 +480,8 @@ var _ = Describe("Upgrading the CRDs over existing objects", Ordered, func() {
 			Expect(c.Get(context.TODO(), monitorKey, &monitor)).To(Succeed())
 			Expect(conditionOf(monitor.Status.Conditions, "ConfigGenerated").Status).To(Equal(metav1.ConditionTrue))
 			Expect(conditionOf(monitor.Status.Conditions, "Ready").Reason).NotTo(Equal("InvalidMetric"))
-			var config corev1.ConfigMap
-			Expect(c.Get(context.TODO(), types.NamespacedName{Name: "pgpilot-uses-old-rules-config", Namespace: libraryNS},
-				&config)).To(Succeed())
+			config, err := mountedConfigMap(c, monitorKey)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(config.Data["metrics.yaml"]).To(ContainSubstring("queue_depth"))
 		})
 	})

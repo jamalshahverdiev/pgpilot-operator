@@ -72,18 +72,31 @@ EOF
 # ---------------------------------------------------------------------------
 # 2. Verify child resources created
 # ---------------------------------------------------------------------------
+# Each configuration has a ConfigMap of its own, pgpilot-test-db-config-<hash>.
+# The one that counts is the one the collector's pod template mounts.
+mounted_configmap() {
+  kubectl get deployment pgpilot-test-db -n "$TEST_NS" \
+    -o jsonpath='{.spec.template.spec.volumes[?(@.configMap)].configMap.name}' 2>/dev/null || echo ""
+}
+
 info "Waiting for child resources (up to 30s)..."
 for i in $(seq 1 15); do
   sleep 2
-  CM=$(kubectl get configmap pgpilot-test-db-config -n "$TEST_NS" -o name 2>/dev/null || echo "")
   DEP=$(kubectl get deployment pgpilot-test-db -n "$TEST_NS" -o name 2>/dev/null || echo "")
+  CM_NAME=$(mounted_configmap)
+  CM=""
+  if [[ -n "$CM_NAME" ]]; then
+    CM=$(kubectl get configmap "$CM_NAME" -n "$TEST_NS" -o name 2>/dev/null || echo "")
+  fi
   SVC=$(kubectl get service pgpilot-test-db -n "$TEST_NS" -o name 2>/dev/null || echo "")
   if [[ -n "$CM" && -n "$DEP" && -n "$SVC" ]]; then break; fi
   echo -n "."
 done
 echo ""
 
-[[ -n "$CM" ]]  && ok "ConfigMap pgpilot-test-db-config created"  || fail "ConfigMap not found"
+[[ -n "$CM" ]]  && ok "ConfigMap $CM_NAME created"  || fail "ConfigMap not found"
+[[ "$CM_NAME" =~ ^pgpilot-test-db-config-[0-9a-f]{10}$ ]] && ok "ConfigMap is named after its configuration" \
+  || fail "ConfigMap name: $CM_NAME"
 [[ -n "$DEP" ]] && ok "Deployment pgpilot-test-db created"        || fail "Deployment not found"
 [[ -n "$SVC" ]] && ok "Service pgpilot-test-db created"           || fail "Service not found"
 
@@ -91,7 +104,7 @@ echo ""
 # 3. Verify ConfigMap content
 # ---------------------------------------------------------------------------
 info "Test 2: ConfigMap content"
-SOURCES=$(kubectl get configmap pgpilot-test-db-config -n "$TEST_NS" -o jsonpath='{.data.sources\.yaml}' 2>/dev/null || echo "")
+SOURCES=$(kubectl get configmap "$CM_NAME" -n "$TEST_NS" -o jsonpath='{.data.sources\.yaml}' 2>/dev/null || echo "")
 if echo "$SOURCES" | grep -q "pg.example.com:5432"; then
   ok "sources.yaml contains host:port"
 else
@@ -172,7 +185,7 @@ FINALIZERS=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.met
 OBS_GEN=$(kubectl get pgpilotmonitor test-db -n "$TEST_NS" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || echo "0")
 [[ "$OBS_GEN" -ge 1 ]] && ok "observedGeneration >= 1" || fail "observedGeneration: $OBS_GEN"
 
-OWNER=$(kubectl get configmap pgpilot-test-db-config -n "$TEST_NS" -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || echo "")
+OWNER=$(kubectl get configmap "$CM_NAME" -n "$TEST_NS" -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || echo "")
 [[ "$OWNER" == "PgpilotMonitor" ]] && ok "OwnerReference on ConfigMap" || fail "OwnerReference kind: $OWNER"
 
 # ---------------------------------------------------------------------------
@@ -214,7 +227,12 @@ kubectl patch pgpilotmonitor test-db -n "$TEST_NS" --type=merge \
   -p '{"spec":{"metrics":{"fromLibraries":[{"name":"test-lib"}]}}}'
 sleep 5
 
-METRICS_YAML=$(kubectl get configmap pgpilot-test-db-config -n "$TEST_NS" -o jsonpath='{.data.metrics\.yaml}' 2>/dev/null || echo "")
+# The changed configuration is in another ConfigMap: ask the Deployment again.
+CM_NAME=$(mounted_configmap)
+METRICS_YAML=""
+if [[ -n "$CM_NAME" ]]; then
+  METRICS_YAML=$(kubectl get configmap "$CM_NAME" -n "$TEST_NS" -o jsonpath='{.data.metrics\.yaml}' 2>/dev/null || echo "")
+fi
 if echo "$METRICS_YAML" | grep -q "custom_test_metric"; then
   ok "Library metrics merged into ConfigMap"
 else

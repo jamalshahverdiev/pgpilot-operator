@@ -34,7 +34,7 @@ error):
 | `NoSinkEnabled` | Neither sink is in use: `spec.sinks.prometheus.enabled` is `false`, and `spec.sinks.grpc` is not enabled or has no `endpoint`. pgwatch exits at once without a sink, so no collector is generated. The API server refuses such a monitor today; this is one stored before it did, and the Deployment, Service and ServiceMonitor that release made for it are left as they are, the pod restarting. Enable a sink |
 | `NameConflict` | An object with the name of a generated one exists and is not this monitor's, see below |
 | `ApplyRejected` | The API server, or an admission policy, refused a generated object as invalid, see below |
-| `ApplyFailed`, `ConfigBuildFailed` | The operator could not write or render something; it retries. If it persists, the message and the operator's log say why |
+| `ApplyFailed`, `ConfigBuildFailed` | The operator could not write or render something; it retries. `exceeded quota` on a ConfigMap means the namespace's ResourceQuota has no room for a second one, which every change of the configuration needs until its rollout is complete. If it persists, the message and the operator's log say why |
 
 `status.ready` and the READY column of `kubectl get pm` always say the same as
 this condition. While a change cannot be rolled out the monitor is not ready
@@ -199,7 +199,7 @@ spec and a new pgwatch version do not reach it.
 
 Everything the operator generates for a monitor is named after it:
 `pgpilot-<name>` (Deployment, Service, ServiceMonitor),
-`pgpilot-<name>-config` (ConfigMap) and, for a monitor with inline
+`pgpilot-<name>-config-<hash>` (ConfigMap, one for each configuration) and, for a monitor with inline
 credentials, `pgpilot-<name>-credentials` (Secret). When an object of that kind and name is
 already in the namespace and was not generated for this monitor, the operator
 leaves it exactly as it is and reports the conflict; the message names the
@@ -355,10 +355,6 @@ The first line pgwatch logs for a source tells which case it is:
   certificate` - the server asks for a client certificate
   (`spec.database.tls.clientCertSecretRef`); `certificate authentication
   failed for user` - it got one whose common name is not the database user.
-- `unable to read CA file` or `unable to read sslkey` with `no such file or
-  directory`, in a pod that was running before certificates were added to
-  the monitor: see [Adding certificates to a running
-  monitor](#adding-certificates-to-a-running-monitor).
 
 ## Some metrics are missing, late or arrive in bursts
 
@@ -504,15 +500,39 @@ for a reason of its own (`InvalidMetric`, `InvalidPreset`, `InvalidName`, a
 missing Secret or library) nothing is generated until that is corrected, and
 the ConfigMap stays as it was; see the table at the top.
 
-The operator uses a content-hash annotation (`pgpilot.io/config-hash`) on the pod template to trigger rollouts. If the hash does not change, no rollout occurs.
-
-Check:
+Each configuration has a ConfigMap of its own, `pgpilot-<name>-config-<hash>`,
+named after the hash of its content; `status.configHash` and the pod
+annotation `pgpilot.io/config-hash` carry the same hash. A change of the spec
+that changes the configuration therefore shows as a new ConfigMap and a
+rollout; one that does not (a label, a resource limit) leaves the ConfigMap
+alone.
 
 ```bash
-kubectl get configmap pgpilot-<name>-config -n <namespace> -o yaml
+kubectl get configmap -n <namespace> -l pgpilot.io/monitor=<name>
+kubectl get pgpilotmonitor <name> -n <namespace> -o jsonpath='{.status.configHash}'
 ```
 
-If the ConfigMap content matches your spec, the hash is correct and no rollout is needed.
+The current one is the one the collector mounts; its name ends in the first
+ten characters of `status.configHash`:
+
+```bash
+kubectl get deployment pgpilot-<name> -n <namespace> \
+  -o jsonpath='{.spec.template.spec.volumes[*].configMap.name}'
+```
+
+More than one ConfigMap for a monitor means that the others have not been
+cleared away yet. During a rollout the other one is what the pod of the
+previous configuration reads. The operator removes them at its first look
+that finds the monitor `Ready` (`ConfigMapRemoved` event), so they also stay
+while the monitor is not ready for a reason of its own, a Service that
+cannot be written for example, although the pods have long been replaced;
+the `Ready` condition names the reason.
+
+The generated ConfigMaps are immutable: the API server refuses a change to
+their content, because the name stands for it. One that is deleted by hand
+comes back at once if it is the current one. The ConfigMap of an earlier
+configuration does not: the pod that still reads it keeps running on what it
+has, and cannot be started again until the rollout is complete.
 
 ## ServiceMonitor not created
 
@@ -618,6 +638,8 @@ missing).
 - `Warning/NamespaceTagReplaced` — `spec.database.customTags` has a `namespace`
   key with another value than the monitor's namespace. The tag is the
   operator's; the value is not used. Use another key
+- `Normal/ConfigMapRemoved` — the ConfigMap of an earlier configuration, or the
+  one of an earlier release, was deleted once no pod read it any more
 - `Normal/CredentialsSecretRemoved` — the Secret the operator generated from
   inline credentials was deleted, because the monitor now names a Secret of
   its own
@@ -707,23 +729,3 @@ the new one.
 A renewal that leaves the Secret unusable (`SecretKeyMissing`,
 `InvalidCertificate`) is reported and changes nothing for the running
 collector, which keeps what it started with.
-
-## Adding certificates to a running monitor
-
-The pod is replaced, and the pod it replaces keeps collecting until the new
-one is available, with one exception to know about. Where pgwatch finds the
-certificates is part of the connection string, which is in the monitor's
-ConfigMap, and the ConfigMap is one for both pods. pgwatch reads it again
-every two minutes. If the new pod does not become available - it cannot be
-scheduled, its image cannot be pulled, its gRPC receiver refuses it - the
-old pod picks up a connection string that names files it does not have,
-logs `unable to read CA file: open /etc/pgwatch-tls/...: no such file or
-directory` at its next look (`unable to read sslkey: ...` when only a client
-certificate was added) and collects nothing until the rollout is put right
-or the certificates are taken out of the monitor again. The same holds
-for any change of the connection string during a rollout that is stuck, a
-changed `sslmode` or `host` included.
-
-The monitor reports the stuck rollout (`CrashLoopBackOff`, `Unschedulable`,
-`ImagePullBackOff`, ...) as soon as it is known. A missing or unusable
-Secret is not such a case: it is found before anything is changed.

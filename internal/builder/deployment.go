@@ -58,14 +58,16 @@ const (
 	webDisableArg = "--web-disable=all"
 )
 
-// PodTemplateVersions are markers written as annotations on the pod template.
-// The collector takes its credentials from the environment, which is fixed
-// when it starts, and although it re-reads its configuration files every two
-// minutes, a mounted ConfigMap takes about as long again to reach the pod. A
-// change in either therefore replaces the pod, which applies it at a known
-// moment; a changed annotation is what makes the Deployment do that.
+// PodTemplateVersions say which configuration and which credentials a pod
+// template is for. The collector takes its credentials from the environment,
+// which is fixed when it starts, and its configuration from a ConfigMap that
+// is made for that configuration alone and named after it. A change in
+// either therefore changes the template and replaces the pod, which applies
+// it at a known moment, and the pod it replaces keeps what it started with
+// until it is gone.
 type PodTemplateVersions struct {
-	// Config is the hash of the rendered ConfigMap.
+	// Config is the hash of the rendered ConfigMap. It is an annotation
+	// of the template, and part of the name of the ConfigMap it mounts.
 	Config string
 	// Credentials identifies the state of the Secret the pod takes its
 	// credentials from: the one the monitor references, or the one generated
@@ -180,7 +182,7 @@ func BuildDeployment(
 						{
 							Name: configVolumeName,
 							ConfigMap: &corev1.ConfigMapVolumeSource{
-								Name: name + "-config",
+								Name: ConfigMapName(monitor.Name, versions.Config),
 							},
 						},
 						{

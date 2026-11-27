@@ -95,9 +95,8 @@ var _ = Describe("The collector's configuration", func() {
 
 	// generated returns the ConfigMap and the arguments of the collector.
 	generated := func(g Gomega, key types.NamespacedName) (map[string]string, []string) {
-		var config corev1.ConfigMap
-		g.Expect(k8sClient.Get(context.TODO(),
-			types.NamespacedName{Name: "pgpilot-" + key.Name + "-config", Namespace: key.Namespace}, &config)).To(Succeed())
+		config, err := mountedConfigMap(k8sClient, key)
+		g.Expect(err).NotTo(HaveOccurred())
 		var dep appsv1.Deployment
 		g.Expect(k8sClient.Get(context.TODO(),
 			types.NamespacedName{Name: "pgpilot-" + key.Name, Namespace: key.Namespace}, &dep)).To(Succeed())
