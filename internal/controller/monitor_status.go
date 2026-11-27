@@ -63,7 +63,10 @@ const (
 	reasonRunContainerError          = "RunContainerError"
 
 	// The spec cannot be turned into a collector.
-	reasonInvalidName   = "InvalidName"
+	reasonInvalidName = "InvalidName"
+	// No sink is in use. The API server refuses such a spec; one stored
+	// before it did can still be one.
+	reasonNoSinkEnabled = "NoSinkEnabled"
 	reasonInvalidPreset = "InvalidPreset"
 	// An object of a generated name exists and is not the monitor's.
 	reasonNameConflict = "NameConflict"
@@ -426,8 +429,12 @@ func collectorState(dep *appsv1.Deployment, pods []corev1.Pod) (ready bool, reas
 	}
 	// Before the current template has a pod, the pods are those of the
 	// previous one, and what troubles them is no longer the question.
+	// A pod without probes is ready as soon as its container runs, and
+	// counts as available only after minReadySeconds. Until then it is
+	// settling, and what it went through before is still the question.
+	settling := dep.Spec.MinReadySeconds > 0
 	if st.UpdatedReplicas > 0 {
-		if r, m, found := podProblem(pods); found {
+		if r, m, found := podProblem(pods, settling); found {
 			return false, r, m
 		}
 	}
@@ -436,6 +443,10 @@ func collectorState(dep *appsv1.Deployment, pods []corev1.Pod) (ready bool, reas
 		return false, reasonRolloutStuck, "The rollout of the collector does not progress: " + cond.Message
 	}
 	if st.UpdatedReplicas == want && st.Replicas == want {
+		if settling && st.ReadyReplicas >= want {
+			return false, reasonPodNotReady, fmt.Sprintf("pgwatch pod is running; without a probe to ask, "+
+				"it counts as available once it has run for %d seconds", dep.Spec.MinReadySeconds)
+		}
 		return false, reasonPodNotReady, "pgwatch pod is not ready yet"
 	}
 	message = fmt.Sprintf("Waiting for the collector pod of the current spec (%d of %d updated, %d available)",
@@ -480,11 +491,18 @@ func podIsReady(pod *corev1.Pod) bool {
 // garbage collected, and what it died of says nothing about its replacement.
 // Older pods are not asked either: with one replica they can only belong to
 // a previous spec.
-func podProblem(pods []corev1.Pod) (reason, message string, found bool) {
+//
+// settling says that the pods have no readiness probe (the Deployment waits
+// minReadySeconds instead). Such a pod is ready whenever its container runs,
+// also between two crashes: being ready says nothing about it, so the newest
+// pod is asked whether it is ready or not, and a container of it that was
+// restarted is still what it was before it came up again. The caller only
+// gets here while the Deployment does not count the pod as available.
+func podProblem(pods []corev1.Pod, settling bool) (reason, message string, found bool) {
 	var pod *corev1.Pod
 	for i := range pods {
 		candidate := &pods[i]
-		if candidate.DeletionTimestamp != nil || podIsReady(candidate) ||
+		if candidate.DeletionTimestamp != nil || (podIsReady(candidate) && !settling) ||
 			candidate.Status.Phase == corev1.PodFailed || candidate.Status.Phase == corev1.PodSucceeded {
 			continue
 		}
@@ -510,12 +528,12 @@ func podProblem(pods []corev1.Pod) (reason, message string, found bool) {
 		if t := cs.State.Terminated; t != nil && t.ExitCode == 0 {
 			continue
 		}
-		if r, m, ok := containerProblem(pod.Name, cs); ok {
+		if r, m, ok := containerProblem(pod.Name, cs, settling); ok {
 			return r, m, true
 		}
 	}
 	for i := range pod.Status.ContainerStatuses {
-		if r, m, ok := containerProblem(pod.Name, &pod.Status.ContainerStatuses[i]); ok {
+		if r, m, ok := containerProblem(pod.Name, &pod.Status.ContainerStatuses[i], settling); ok {
 			return r, m, true
 		}
 	}
@@ -530,7 +548,10 @@ func podProblem(pods []corev1.Pod) (reason, message string, found bool) {
 // A container that exited is not yet one that keeps exiting: until it has
 // been restarted loopingRestarts times it is reported as not ready, with what
 // it exited of.
-func containerProblem(pod string, cs *corev1.ContainerStatus) (reason, message string, found bool) {
+//
+// settling is true for a pod without probes that is not yet available (see
+// podProblem): its restarted container counts although it is ready.
+func containerProblem(pod string, cs *corev1.ContainerStatus, settling bool) (reason, message string, found bool) {
 	if w := cs.State.Waiting; w != nil {
 		switch w.Reason {
 		case "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull":
@@ -543,7 +564,8 @@ func containerProblem(pod string, cs *corev1.ContainerStatus) (reason, message s
 			return reasonCrashLoopBackOff, crashMessage(pod, cs, true), true
 		}
 	}
-	if cs.State.Terminated != nil || (!cs.Ready && cs.RestartCount > 0 && cs.LastTerminationState.Terminated != nil) {
+	restarted := cs.RestartCount > 0 && cs.LastTerminationState.Terminated != nil
+	if cs.State.Terminated != nil || (restarted && (!cs.Ready || settling)) {
 		if cs.RestartCount < loopingRestarts {
 			return reasonPodNotReady, crashMessage(pod, cs, false), true
 		}

@@ -104,6 +104,44 @@ presets:
       ...
 ```
 
+## The collector pod
+
+One Deployment with one replica runs pgwatch for a monitor.
+
+- **Port and probes.** With the Prometheus sink the container has the port
+  `metrics` (9187 unless `spec.sinks.prometheus.port` says otherwise) and TCP
+  liveness and readiness probes of it. Without that sink nothing listens in
+  the pod (pgwatch's web server is turned off, and the gRPC sink only
+  connects out), so there is neither a port nor a probe. The kubelet restarts
+  a collector that exits in either case; in place of a readiness probe the
+  Deployment then has `minReadySeconds: 60`. pgwatch asks its gRPC receiver
+  for a sign of life when it starts and exits without one: at once when the
+  connection is refused or the name does not resolve, after 20 to 50 seconds
+  when nothing answers at all (a NetworkPolicy or firewall that drops the
+  packets). A minute outlasts that, so a collector that cannot deliver never
+  counts as running, and never takes the place of one that can.
+- **Changes.** A changed configuration, changed credentials or a new image
+  replace the pod. The Deployment keeps Kubernetes' default strategy: the new
+  pod is started first and the old one stopped when the new one is ready.
+  For a moment two collectors query the database, and with the gRPC sink
+  both send; with the gRPC sink alone that moment is the minute above. In return a change that cannot start (an image that cannot be
+  pulled, a `ResourceQuota` without room for a second pod) leaves the
+  collector that runs in place, and the monitor says why it is not ready
+  (`ImagePullBackOff`, `PodCreateFailed`, `RolloutStuck`). In a namespace
+  whose quota has room for exactly one collector pod, a change therefore
+  waits until there is room for a second one.
+- **Security.** The container runs as a non-root user with a read-only root
+  filesystem, without capabilities and without privilege escalation, under
+  the `RuntimeDefault` seccomp profile; the pod passes the `restricted` Pod
+  Security Standard. No ServiceAccount token is mounted.
+- **Scratch space.** `/tmp` is an `emptyDir`, the one writable place. The pod
+  template names it in `cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes`,
+  so that it does not keep the cluster autoscaler from removing a node.
+- **Image.** `spec.image`, with the operator's pgwatch release for whatever
+  is left unset; `spec.image.pullPolicy` is set on the container.
+- **Resources.** `spec.resources` as it is, see
+  [crd-reference.md](crd-reference.md#specresources).
+
 ## Config hash rollout
 
 The ConfigMap content is hashed (SHA-256). The hash is set as the `pgpilot.io/config-hash` annotation on the Deployment's pod template. When the config changes, the hash changes, triggering a rolling update.

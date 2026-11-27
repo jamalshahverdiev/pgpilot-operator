@@ -194,6 +194,17 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 		return outcome{reason: reasonInvalidName, message: err.Error()}
 	}
 
+	// A collector without a sink exits as soon as it starts. The API server
+	// refuses a monitor without one; a monitor stored before it did still
+	// gets here, and a Deployment that can only crash is not worth making.
+	if !builder.HasSink(monitor) {
+		const message = "No sink is in use: spec.sinks.prometheus is not enabled, and spec.sinks.grpc is not " +
+			"enabled or names no endpoint. A collector without a sink exits as soon as it starts, so nothing " +
+			"is changed for this monitor until one is enabled"
+		status.set(conditionConfigGenerated, metav1.ConditionFalse, reasonNoSinkEnabled, message)
+		return outcome{reason: reasonNoSinkEnabled, message: message}
+	}
+
 	// --- Step 1: Validate credentials source. ---
 	creds, stop := r.resolveCredentials(ctx, status)
 	if stop != nil {

@@ -270,7 +270,8 @@ type ImageSpec struct {
 	// +optional
 	Tag string `json:"tag,omitempty"`
 
-	// pullPolicy for the image.
+	// pullPolicy of the pgwatch container. The default also holds for the
+	// tag "latest", which Kubernetes would otherwise pull at every start.
 	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
 	// +kubebuilder:default=IfNotPresent
 	// +optional
@@ -335,7 +336,8 @@ type PgpilotMonitorSpec struct {
 	// enabled.
 	Sinks SinksSpec `json:"sinks"`
 
-	// resources overrides requests/limits on the pgwatch container.
+	// resources are the requests and limits of the pgwatch container. The
+	// operator sets none of its own when this is left empty.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 

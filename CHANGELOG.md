@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+### The collector pod
+
+- A monitor with the gRPC sink alone gets a collector that becomes ready.
+  Its pod carried the port and the TCP probes of the Prometheus sink, on
+  which nothing listened: it never became ready, was restarted about once a
+  minute, and the monitor stayed `PodNotReady`. Without the Prometheus sink
+  the pod now has no port and no probes. In place of a readiness probe it
+  counts as available once it has run for a minute. That is longer than
+  pgwatch takes to give up on a receiver it cannot use (at once when the
+  connection is refused or the name does not resolve, 20 to 50 seconds when
+  nothing answers), so a collector that cannot deliver is reported as
+  `CrashLoopBackOff` and never as running.
+- A monitor without any sink in use reports `NoSinkEnabled`, and no collector
+  is generated for it; one without a sink exits as soon as it starts. The API
+  server refuses such a monitor, so this is about one stored before it did,
+  and about a gRPC sink that is enabled and names no endpoint. What an
+  earlier release generated for such a monitor is left as it is, the pod
+  restarting, until a sink is enabled or the monitor is deleted.
+- `spec.image.pullPolicy` reaches the pod. The field was accepted and
+  ignored.
+- The pod passes the `restricted` Pod Security Standard: its seccomp profile
+  is `RuntimeDefault`. In a namespace that enforces that standard no
+  collector pod could be created.
+- The pod no longer mounts a ServiceAccount token. The collector never talks
+  to the Kubernetes API.
+- The pod template carries the annotation
+  `cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes: tmp`.
+  Without it the pod's `emptyDir` kept the cluster autoscaler from removing
+  the node it ran on. The annotation gives way to one of the same name in
+  `spec.podMetadata.annotations`.
+- [observability.md](docs/observability.md#sample-timestamps-and-metrics-on-long-intervals)
+  says why a metric collected less often than every five minutes shows gaps
+  in Prometheus, and how to query it. The generated ServiceMonitor is not
+  changed for it: the setting that closes the gaps makes every `rate()`
+  uneven.
+
+Upgrade notes:
+
+- Every collector pod is replaced once when the operator is upgraded, because
+  the pod template changed. As with every change, the new pod is started
+  before the old one is stopped.
+- A monitor with an `image` block that names no `pullPolicy` has
+  `IfNotPresent`, the default of the field, and its pod now gets exactly
+  that. For the tag `latest` Kubernetes used to pull at every start; set
+  `pullPolicy: Always` to keep that.
+- A collector with the gRPC sink alone has no `ports`, no probes, and
+  `minReadySeconds: 60` on its Deployment. Its monitor turns `Ready` a minute
+  after the pod has started, and at every change the pod of the previous
+  spec keeps running for that minute next to the new one; both send to the
+  receiver meanwhile.
+
 ### Metric definitions stored before the validation rules
 
 - The rules this release adds for metric definitions (`sqls` keys that are

@@ -238,11 +238,15 @@ func newMonitor(name string, metrics pgpilotv1.MetricsSpec) *pgpilotv1.PgpilotMo
 
 // collector is a running pgwatch container.
 type collector struct {
-	t       *testing.T
-	name    string
-	image   string
-	port    int32
-	monitor *pgpilotv1.PgpilotMonitor
+	t     *testing.T
+	name  string
+	image string
+	// port is the port of the Prometheus sink, 0 for a pod without one.
+	port int32
+	// availableAfter is the Deployment's minReadySeconds: how long the pod
+	// has to stay up before it counts as available.
+	availableAfter time.Duration
+	monitor        *pgpilotv1.PgpilotMonitor
 }
 
 // secrets is what the Secrets referenced by the generated pod would hold.
@@ -279,17 +283,26 @@ func startCollector(
 	container := pod.Containers[0]
 
 	c := &collector{
-		t:       t,
-		name:    "pgpilot-collector-test-" + runID + "-" + monitor.Name,
-		image:   container.Image,
-		monitor: monitor,
+		t:              t,
+		name:           "pgpilot-collector-test-" + runID + "-" + monitor.Name,
+		image:          container.Image,
+		availableAfter: time.Duration(deployment.Spec.MinReadySeconds) * time.Second,
+		monitor:        monitor,
 	}
 	c.port = probedMetricsPort(t, container)
+	// Said here, where it happens: a pod that lost its port would otherwise
+	// show as a collector that cannot be scraped, minutes later.
+	if builder.PrometheusSinkEnabled(monitor) != (c.port != 0) {
+		t.Fatalf("the Prometheus sink is enabled: %v, but the metrics port of the pod is %d",
+			builder.PrometheusSinkEnabled(monitor), c.port)
+	}
 	if len(container.Command) != 0 {
 		t.Fatalf("the builder sets a command; teach the test to override the image's entrypoint")
 	}
 	args := slices.Concat(
-		[]string{"run", "--detach", "--name", c.name, "--network", network, "--label", runLabel},
+		[]string{"run", "--detach", "--name", c.name, "--network", network, "--label", runLabel,
+			// The way from a collector to a gRPC receiver in this process.
+			"--add-host", receiverHost + ":host-gateway"},
 		securityFlags(t, pod, container),
 		envFlags(t, container, creds),
 		volumeFlags(t, pod, container, configMap),
@@ -399,7 +412,9 @@ func volumeFlags(t *testing.T, pod corev1.PodSpec, container corev1.Container, c
 }
 
 // probedMetricsPort returns the port named metrics, after checking that the
-// probes are the TCP checks of that port the test knows how to imitate.
+// probes are the TCP checks of that port the test knows how to imitate. A
+// pod without the Prometheus sink has no such port, and 0 is returned; the
+// kubelet must then have nothing to probe, since nothing listens in it.
 func probedMetricsPort(t *testing.T, container corev1.Container) int32 {
 	t.Helper()
 	var metrics int32
@@ -409,7 +424,12 @@ func probedMetricsPort(t *testing.T, container corev1.Container) int32 {
 		}
 	}
 	if metrics == 0 {
-		t.Fatalf("the container has no port named metrics")
+		if len(container.Ports) != 0 || container.LivenessProbe != nil || container.ReadinessProbe != nil ||
+			container.StartupProbe != nil {
+			t.Fatalf("the container has no port named metrics, but ports %+v or a probe; "+
+				"teach the test what listens there", container.Ports)
+		}
+		return 0
 	}
 	probes := map[string]*corev1.Probe{"liveness": container.LivenessProbe, "readiness": container.ReadinessProbe}
 	for name, probe := range probes {

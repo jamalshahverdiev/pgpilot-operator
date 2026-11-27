@@ -59,11 +59,11 @@ gives a Prometheus endpoint on port 9187. To use the gRPC sink alone, set
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `prometheus.enabled` | bool | no | `true` | Enable Prometheus /metrics endpoint. With `false` the monitor has no Service and no ServiceMonitor |
+| `prometheus.enabled` | bool | no | `true` | Enable Prometheus /metrics endpoint. With `false` the monitor has no Service and no ServiceMonitor, and its pod has no port and no probes: nothing listens in it. Such a pod counts as available once it has run for a minute, which is longer than pgwatch waits for a receiver that does not answer |
 | `prometheus.port` | int32 | no | `9187` | Port for /metrics (1-65535) |
 | `grpc.enabled` | bool | no | `false` | Enable gRPC sink |
 | `grpc.endpoint` | string | when enabled | | gRPC receiver host:port, no whitespace, max 512 chars |
-| `grpc.tls.caSecretRef` | string | no | | Secret name with CA cert (key: `ca.crt`) |
+| `grpc.tls.caSecretRef` | string | no | | Secret name with CA cert (key: `ca.crt`). **Not used yet:** the collector connects to the receiver without TLS whatever is set here, and exits at once if the receiver only speaks TLS |
 
 #### Presets
 
@@ -85,7 +85,27 @@ name with other characters than the pattern above allows, such as
 
 ### spec.resources
 
-Standard Kubernetes `ResourceRequirements` (`requests`, `limits`).
+Standard Kubernetes `ResourceRequirements` (`requests`, `limits`) of the
+pgwatch container, handed on as they are. The operator sets nothing of its own
+when the field is left empty: what a `LimitRange` of the namespace gives a
+container without requests then applies, and without one the pod is
+`BestEffort`, the first to be evicted when its node runs short of memory. In a
+namespace with a `ResourceQuota` on CPU or memory a pod without requests and
+limits cannot be created at all; the monitor then reports `PodCreateFailed`
+with the API server's message. Setting at least requests is recommended:
+
+```yaml
+spec:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+```
+
+How much memory a collector needs grows with the number of tables, indexes and
+statements the preset reports on; watch it before settling on a limit.
 
 ### spec.image
 
@@ -93,7 +113,7 @@ Standard Kubernetes `ResourceRequirements` (`requests`, `limits`).
 |-------|------|----------|---------|-------------|
 | `repository` | string | no | `cybertecpostgresql/pgwatch` | pgwatch image repository |
 | `tag` | string | no | `6.2.0` | Image tag. Leave unset to run the pgwatch release the operator is built for |
-| `pullPolicy` | enum | no | `IfNotPresent` | `Always`, `IfNotPresent`, `Never` |
+| `pullPolicy` | enum | no | `IfNotPresent` | `Always`, `IfNotPresent`, `Never`. Set on the pgwatch container as it is; the default also holds for the tag `latest`, which Kubernetes would otherwise pull at every start |
 
 The defaults of `repository` and `tag` are applied by the operator when it
 builds the collector pod; they are not written into the object. A monitor that
