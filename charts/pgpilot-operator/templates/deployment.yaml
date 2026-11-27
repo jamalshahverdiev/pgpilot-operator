@@ -49,6 +49,20 @@ spec:
             {{- with .Values.credentials.recheckInterval }}
             - --credentials-recheck-interval={{ . }}
             {{- end }}
+            {{- /* A number from a values file, --set-json or the stored values of a
+                   release is a float, which prints as 1.00068e+09. */}}
+            {{- $rawRunAsUser := dig "runAsUser" "" (.Values.collector | default dict) }}
+            {{- $runAsUser := toString $rawRunAsUser }}
+            {{- if and (kindIs "float64" $rawRunAsUser) (eq (floor $rawRunAsUser) $rawRunAsUser) }}
+            {{- $runAsUser = printf "%.0f" $rawRunAsUser }}
+            {{- end }}
+            {{- if and (ne $runAsUser "") (ne $runAsUser "auto") }}
+            {{- $isUser := and (regexMatch "^[1-9][0-9]{0,9}$" $runAsUser) (le (int64 $runAsUser) 2147483647) }}
+            {{- if not (or (eq $runAsUser "none") $isUser) }}
+            {{- fail (printf "collector.runAsUser must be a user ID from 1 to 2147483647, \"none\" or \"auto\", got %q" $runAsUser) }}
+            {{- end }}
+            - --collector-run-as-user={{ $runAsUser }}
+            {{- end }}
             {{- $storedImageTag := toString (dig "storedImageTag" true (.Values.migrations | default dict)) }}
             {{- if eq $storedImageTag "false" }}
             - --migrate-stored-image-tag=false

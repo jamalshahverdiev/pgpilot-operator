@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Where the collector pod runs, and as whom
+
+- `spec.scheduling` places the collector pod: `nodeSelector`, `tolerations`,
+  `affinity`, `topologySpreadConstraints`, `priorityClassName`, passed on to
+  the pod as they are.
+- `spec.image.pullSecrets` names the Secrets with credentials for the
+  registry of the pgwatch image. A private mirror no longer needs them
+  attached to the `default` ServiceAccount of every namespace.
+- `spec.serviceAccountName` names the ServiceAccount of the collector pod.
+  The kubelet still mounts no token into it. With this field, permission to
+  write a monitor is permission to run a container as any ServiceAccount of
+  the namespace, the identity a cloud provider binds to it included: see
+  `spec.serviceAccountName` in `docs/crd-reference.md`.
+- `spec.env` adds environment variables to the pgwatch container, for
+  settings of the PostgreSQL driver and of pgwatch that have no field of
+  their own (`PGOPTIONS`, `PGCONNECT_TIMEOUT`, `PW_MIN_DB_SIZE_MB`, a proxy).
+  The variables the operator sets or passes to pgwatch itself are refused.
+- **OpenShift.** The collector pod asked for user 65534, which the
+  `restricted-v2` security context constraint refuses: outside the few
+  namespaces OpenShift does not check, no collector started without
+  granting `nonroot-v2` to the ServiceAccount of its namespace. On
+  OpenShift, recognised by the API group `security.openshift.io`, the pod
+  now names no user and gets one from the range of its namespace; in the
+  namespaces where OpenShift assigns none (`default`, `kube-system`,
+  `kube-public`, `openshift`, `openshift-infra`, `openshift-node`) it keeps
+  65534. `--collector-run-as-user` (`collector.runAsUser` in the chart) says
+  it explicitly: `auto`, `none` or a user ID.
+
+Upgrade notes:
+
+- Monitors that set none of the new fields get the pod they had, with one
+  addition: the pod template names the ServiceAccount `default`, which is
+  the account it ran as anyway. **An account that was set on a collector's
+  Deployment by hand, or by a policy, is replaced by `default`**: put it into
+  `spec.serviceAccountName` of the monitor before upgrading.
+- On OpenShift the collectors of a namespace where `nonroot-v2` was granted
+  to make them start now run as a user of the namespace's range, because
+  `restricted-v2` validates them again and is tried first. Set
+  `collector.runAsUser: "65534"` to keep them as they were. A namespace that
+  is exempt from the constraints by the label `openshift.io/run-level`, and
+  not one of those named above, needs that setting as well.
+
 ### A ConfigMap for each configuration
 
 - The ConfigMap of a monitor is no longer changed in place. Each rendered

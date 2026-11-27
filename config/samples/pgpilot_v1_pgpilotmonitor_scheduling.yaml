@@ -1,0 +1,58 @@
+## Example: a collector on a pool of nodes kept for monitoring, with an image
+## from a private mirror and a statement timeout for its queries.
+
+apiVersion: pgpilot.io/v1
+kind: PgpilotMonitor
+metadata:
+  name: prod-orders-db
+  namespace: team-orders
+spec:
+  database:
+    host: orders-db.team-orders.svc.cluster.local
+    database: orders
+    sslmode: require
+    credentialsSecret:
+      name: orders-db-monitor-creds
+
+  metrics:
+    preset: basic
+
+  sinks:
+    prometheus:
+      enabled: true
+
+  image:
+    repository: registry.example.com/mirror/pgwatch
+    # Secrets of type kubernetes.io/dockerconfigjson in this namespace.
+    pullSecrets:
+      - name: registry-example-com
+
+  scheduling:
+    nodeSelector:
+      pool: monitoring
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: monitoring
+        effect: NoSchedule
+    # Keep the collectors of the monitors of this namespace apart where that
+    # is possible. Pods of other namespaces are not counted.
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/managed-by: pgpilot-operator
+    priorityClassName: ""
+
+  # The ServiceAccount of the pod; "default" when left out. No token is
+  # mounted whichever it is.
+  serviceAccountName: default
+
+  # Settings of the PostgreSQL driver and of pgwatch that have no field of
+  # their own. PGUSER, PGPASSWORD and what the operator passes to pgwatch
+  # itself (PW_SOURCES, PW_METRICS, PW_SINK, PW_WEBDISABLE) are refused.
+  env:
+    - name: PGOPTIONS
+      value: "-c statement_timeout=30s"

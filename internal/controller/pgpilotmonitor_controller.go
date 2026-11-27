@@ -121,6 +121,12 @@ type PgpilotMonitorReconciler struct {
 	// that is missing or lacks a key. Zero means thirty seconds.
 	CredentialsRetry time.Duration
 
+	// CollectorRunAsUser is the user of the pgwatch container: a setting
+	// of the operator, not of a monitor, because who may run as what is a
+	// property of the cluster. On OpenShift it can differ by namespace; see
+	// CollectorUser.RunAsUserIn.
+	CollectorRunAsUser CollectorUser
+
 	// replaced holds, per monitor, the resourceVersion the operator's last
 	// status write replaced; see readIsStale.
 	replaced sync.Map
@@ -299,7 +305,7 @@ func (r *PgpilotMonitorReconciler) sync(ctx context.Context, status *monitorStat
 	deployment := builder.BuildDeployment(monitor, merged, builder.PodTemplateVersions{
 		Config:      configHash,
 		Credentials: creds.version,
-	})
+	}, builder.RunAsUser(r.CollectorRunAsUser.RunAsUserIn(monitor.Namespace)))
 	if stop := r.apply(ctx, monitor, deployment); stop != nil {
 		return *stop
 	}
@@ -534,7 +540,7 @@ func describer(obj client.Object) func(error) *outcome {
 					what, taken.owner),
 				requeueAfter: nameConflictRetry,
 			}
-		case apierrors.IsInvalid(err):
+		case apierrors.IsInvalid(err), unknownToTheCluster(err):
 			return &outcome{
 				reason:       reasonApplyRejected,
 				message:      fmt.Sprintf("%s was rejected by the API server: %v", what, err),
@@ -548,6 +554,19 @@ func describer(obj client.Object) func(error) *outcome {
 			}
 		}
 	}
+}
+
+// unknownToTheCluster reports whether a server-side apply was refused before
+// any validation, because the object could not be read by the schema of the
+// API server: a field that this version of Kubernetes does not have. The
+// monitor takes the pod fields of the version the operator is built with,
+// and the cluster may be older.
+//
+// The API server answers that with a plain internal error, not with
+// "invalid", although it is as final: the same object will be refused in the
+// same way until the monitor is changed.
+func unknownToTheCluster(err error) bool {
+	return apierrors.IsInternalError(err) && strings.Contains(err.Error(), "failed to create typed patch object")
 }
 
 // write applies one generated object as the monitor's own, unless an object

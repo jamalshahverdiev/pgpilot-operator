@@ -157,7 +157,38 @@ One Deployment with one replica runs pgwatch for a monitor.
 - **Security.** The container runs as a non-root user with a read-only root
   filesystem, without capabilities and without privilege escalation, under
   the `RuntimeDefault` seccomp profile; the pod passes the `restricted` Pod
-  Security Standard. No ServiceAccount token is mounted.
+  Security Standard. The kubelet mounts no ServiceAccount token, whichever
+  account `spec.serviceAccountName` names; what a cloud provider binds to
+  that account reaches the pod all the same, see
+  [crd-reference.md](crd-reference.md#specserviceaccountname).
+- **User.** The pgwatch image names no user, which means root, and the pod
+  refuses to run as root, so someone has to name one. Who does is a property
+  of the cluster, not of a monitor, and so a setting of the operator
+  (`--collector-run-as-user`, `collector.runAsUser` in the chart): 65534
+  ("nobody") by default. On OpenShift the restricted security context
+  constraints assign a user from the range of the namespace and refuse any
+  other, 65534 included, so there the pod names none. The operator
+  recognises OpenShift by the API group `security.openshift.io` when it
+  starts. OpenShift does not check pods in every namespace: in `default`,
+  `kube-system`, `kube-public`, `openshift`, `openshift-infra` and
+  `openshift-node` nothing assigns a user and nothing refuses one, and a
+  collector there keeps 65534. `none` and a user ID say it explicitly, for
+  every namespace alike. The files the collector reads are readable by any
+  user, and `/tmp` is writable by any, so whichever user it is given works.
+  The pod sets no group and no `fsGroup`.
+- **Placement.** `spec.scheduling` (node selector, tolerations, affinity,
+  topology spread constraints, priority class), `spec.image.pullSecrets` and
+  `spec.serviceAccountName` are the fields of the pod of the same names and
+  are passed on as they are; a monitor that sets none of them has none of
+  them in its pod. The ServiceAccount is the exception: it is always named,
+  `default` when the monitor names none. The API server keeps a deprecated
+  field of the pod in step with it and fills an account that is left out
+  from there, so an account that was named once would otherwise stay after
+  it was taken out of the monitor.
+- **Environment.** `PGUSER` and `PGPASSWORD` from the credentials Secret,
+  then the variables of `spec.env`. The names the operator sets or passes to
+  pgwatch itself are refused there, see
+  [crd-reference.md](crd-reference.md#specenv).
 - **Scratch space.** `/tmp` is an `emptyDir`, the one writable place. The pod
   template names it in `cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes`,
   so that it does not keep the cluster autoscaler from removing a node.

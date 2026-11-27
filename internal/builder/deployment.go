@@ -75,12 +75,41 @@ type PodTemplateVersions struct {
 	Credentials string
 }
 
+// defaultServiceAccount is the account a pod runs as when it names none.
+const defaultServiceAccount = "default"
+
+// DefaultRunAsUser is the user the pgwatch container runs as unless the
+// operator is told otherwise: "nobody". The pgwatch image names no user of
+// its own, which means root, and the pod must not run as root.
+const DefaultRunAsUser int64 = 65534
+
+// PodOption changes how BuildDeployment renders the pod for the cluster the
+// operator runs in, as opposed to what a monitor asks for.
+type PodOption func(*podSettings)
+
+type podSettings struct {
+	runAsUser *int64
+}
+
+// RunAsUser sets the user of the pgwatch container; nil leaves it to the
+// platform. OpenShift assigns one from the range of the namespace, and its
+// restricted security context constraints refuse a pod that asks for a user
+// outside that range, which 65534 is.
+func RunAsUser(uid *int64) PodOption {
+	return func(s *podSettings) { s.runAsUser = uid }
+}
+
 // BuildDeployment creates the Deployment that runs the pgwatch collector.
 func BuildDeployment(
 	monitor *pgpilotv1.PgpilotMonitor,
 	merged MergedMetrics,
 	versions PodTemplateVersions,
+	options ...PodOption,
 ) *appsv1.Deployment {
+	settings := podSettings{runAsUser: new(DefaultRunAsUser)}
+	for _, option := range options {
+		option(&settings)
+	}
 	name := ResourceName(monitor.Name)
 	sysLabels := SystemLabels(monitor.Name)
 	podLabels := MergeLabels(sysLabels, monitor.Spec.PodMetadata.LabelMap())
@@ -105,11 +134,11 @@ func BuildDeployment(
 		// decides by the tag, as it does for any pod.
 		ImagePullPolicy: monitor.Spec.Image.PullPolicy,
 		Args:            buildArgs(monitor, merged),
-		Env:             buildEnvVars(monitor),
+		Env:             append(buildEnvVars(monitor), extraEnvVars(monitor)...),
 		Resources:       monitor.Spec.Resources,
 		SecurityContext: &corev1.SecurityContext{
 			RunAsNonRoot:             new(true),
-			RunAsUser:                ptr.To[int64](65534),
+			RunAsUser:                settings.runAsUser,
 			ReadOnlyRootFilesystem:   new(true),
 			AllowPrivilegeEscalation: new(false),
 			Capabilities: &corev1.Capabilities{
@@ -196,9 +225,24 @@ func BuildDeployment(
 						RunAsNonRoot:   new(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
+					// Always named, "default" included. The API server keeps
+					// the deprecated field serviceAccount in step with this
+					// one, and fills this one from it when it is left out:
+					// an account that was named once would stay for good
+					// after it was taken out of the monitor.
+					ServiceAccountName: orDefault(monitor.Spec.ServiceAccountName, defaultServiceAccount),
+					ImagePullSecrets:   imagePullSecrets(monitor),
 				},
 			},
 		},
+	}
+	if scheduling := monitor.Spec.Scheduling; scheduling != nil {
+		pod := &dep.Spec.Template.Spec
+		pod.NodeSelector = nodeSelector(scheduling)
+		pod.Tolerations = scheduling.Tolerations
+		pod.Affinity = scheduling.Affinity
+		pod.TopologySpreadConstraints = scheduling.TopologySpreadConstraints
+		pod.PriorityClassName = scheduling.PriorityClassName
 	}
 
 	return dep
@@ -251,6 +295,41 @@ func buildEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
 		{Name: "PGUSER", ValueFrom: fromSecret(usernameKey)},
 		{Name: "PGPASSWORD", ValueFrom: fromSecret(passwordKey)},
 	}
+}
+
+// extraEnvVars are the variables of spec.env, after those of the operator:
+// a value may then refer to one of them as $(NAME).
+func extraEnvVars(monitor *pgpilotv1.PgpilotMonitor) []corev1.EnvVar {
+	if len(monitor.Spec.Env) == 0 {
+		return nil
+	}
+	out := make([]corev1.EnvVar, 0, len(monitor.Spec.Env))
+	for _, env := range monitor.Spec.Env {
+		out = append(out, corev1.EnvVar{Name: env.Name, Value: env.Value, ValueFrom: env.ValueFrom})
+	}
+	return out
+}
+
+func imagePullSecrets(monitor *pgpilotv1.PgpilotMonitor) []corev1.LocalObjectReference {
+	if len(monitor.Spec.Image.PullSecrets) == 0 {
+		return nil
+	}
+	out := make([]corev1.LocalObjectReference, 0, len(monitor.Spec.Image.PullSecrets))
+	for _, secret := range monitor.Spec.Image.PullSecrets {
+		out = append(out, corev1.LocalObjectReference{Name: secret.Name})
+	}
+	return out
+}
+
+func nodeSelector(scheduling *pgpilotv1.SchedulingSpec) map[string]string {
+	if len(scheduling.NodeSelector) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(scheduling.NodeSelector))
+	for key, value := range scheduling.NodeSelector {
+		out[key] = string(value)
+	}
+	return out
 }
 
 // CredentialKeys returns the keys of the credentials Secret that hold the

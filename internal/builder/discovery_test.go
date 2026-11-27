@@ -71,3 +71,48 @@ func TestHasServiceMonitorCRD(t *testing.T) {
 		})
 	}
 }
+
+func TestIsOpenShift(t *testing.T) {
+	groups := func(names ...string) []*metav1.APIResourceList {
+		out := make([]*metav1.APIResourceList, 0, len(names))
+		for _, name := range names {
+			out = append(out, &metav1.APIResourceList{GroupVersion: name})
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		served []*metav1.APIResourceList
+		want   bool
+	}{
+		"OpenShift":                         {groups("v1", "apps/v1", "security.openshift.io/v1"), true},
+		"Kubernetes":                        {groups("v1", "apps/v1", "monitoring.coreos.com/v1"), false},
+		"another group of Red Hat's":        {groups("v1", "config.openshift.io/v1"), false},
+		"a group that only ends like it":    {groups("v1", "notsecurity.openshift.io/v1"), false},
+		"a group that only starts like it":  {groups("v1", "security.openshift.io.example.com/v1"), false},
+		"an API server that serves nothing": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := IsOpenShift(discoveryWith(tc.served...))
+			if err != nil || got != tc.want {
+				t.Errorf("got %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// Not knowing is not "no": on OpenShift every collector would be given a
+// user its namespace does not allow.
+type failingDiscovery struct {
+	*fakediscovery.FakeDiscovery
+	err error
+}
+
+func (d failingDiscovery) ServerGroups() (*metav1.APIGroupList, error) { return nil, d.err }
+
+func TestIsOpenShift_NotKnowingIsAFailure(t *testing.T) {
+	failure := apierrors.NewServiceUnavailable("apiserver is shutting down")
+	got, err := IsOpenShift(failingDiscovery{discoveryWith(), failure})
+	if got || !errors.Is(err, failure) || !strings.Contains(err.Error(), "API groups") {
+		t.Errorf("got %v, %v; want the failure handed on", got, err)
+	}
+}
