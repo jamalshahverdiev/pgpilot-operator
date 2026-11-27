@@ -54,7 +54,8 @@ from the environment:
 
 ```yaml
 - name: <monitor-name>
-  conn_str: postgresql://<host>:<port>/<db>?sslmode=<mode>
+  conn_str: postgresql://<host>:<port>/<db>?sslmode=<mode>   # plus sslrootcert, sslcert and
+                                    # sslkey for spec.database.tls
   kind: postgres
   preset_metrics: <preset>          # if only preset is set (no custom)
   custom_metrics:                   # if custom definitions are set, or
@@ -198,6 +199,66 @@ read them the same way and its template holds no password.
   when they carry `app.kubernetes.io/managed-by: pgpilot-operator`, which every
   generated object does. The operator's memory use therefore follows the number
   of monitors, not the size of the cluster.
+
+## Certificates
+
+`spec.database.tls` and `spec.sinks.grpc.tls` name Secrets with certificates:
+the authority the database server is checked against, a client certificate
+for the database, the authority the gRPC receiver is checked against. pgwatch
+takes all three as files, so each Secret is a volume of the pod, read-only,
+under a directory of its own:
+
+| Secret | Mounted at | Passed to pgwatch as |
+|--------|------------|----------------------|
+| `database.tls.caSecretRef` | `/etc/pgwatch-tls/database-ca/ca.crt` | `sslrootcert` in `conn_str` |
+| `database.tls.clientCertSecretRef` | `/etc/pgwatch-tls/database-client-cert/tls.crt`, `tls.key` | `sslcert`, `sslkey` in `conn_str` |
+| `sinks.grpc.tls.caSecretRef` | `/etc/pgwatch-tls/grpc-ca/ca.crt` | `?sslrootca=` on the address of `--sink` |
+
+- The files have fixed names, whatever the keys in the Secrets are called,
+  and only the keys that are named are mounted: a Secret with more in it
+  hands the pod nothing else. The files are readable by everyone in the
+  container (mode `0444`): the files of a Secret volume belong to root, the
+  collector runs as UID 65534, and the pod has no `fsGroup` that would hand
+  them to it. There is one container and one process in the pod.
+- Before it builds the pod the operator reads each Secret (`get`, by name,
+  like a credentials Secret) and checks that the keys are there and hold what
+  pgwatch can load: PEM certificates for an authority; for a client
+  certificate a pair that belongs together, the key without a passphrase and
+  as the first PEM block. That is a copy of what pgwatch does with the
+  files, and a copy can be wrong in both directions, so the collector tests
+  put every case to both, the operator's check and a real pgwatch, and fail
+  where the two disagree. A kubelet would refuse a missing Secret or key by
+  not starting the pod; nothing would refuse the rest before the collector
+  fails over it. What is wrong is the monitor's `SecretNotFound`,
+  `SecretKeyMissing` or `InvalidCertificate`, under the
+  `CredentialsAvailable` condition, and nothing is changed for a collector
+  that already runs. The messages are the operator's own: the errors of the
+  libraries name the kinds of PEM blocks they found, and whoever may write a
+  monitor can point it at any key of any Secret in the namespace.
+- The kubelet updates the files of a Secret volume in a running pod, and
+  pgwatch does not read them again. The identity and version of every mounted
+  Secret is therefore folded into `pgpilot.io/credentials-version`, with that
+  of the credentials Secret, and the Secrets are read again on the same
+  five-minute schedule: a renewed certificate replaces the pod. A monitor
+  with inline credentials, which is otherwise not looked at periodically, is
+  once it mounts a certificate.
+- Whether TLS is used at all is `sslmode`, and the API server refuses a
+  monitor whose `sslmode` would leave a named certificate unused: an
+  authority with anything below `require`, where pgwatch checks no server, a
+  client certificate with `disable`. The default `sslmode` is `disable`, and
+  a monitor that named an authority and was left on it would look protected
+  and send its password in the clear.
+- The operator does not check dates or chains. A certificate that has
+  expired, or an authority that did not sign the server's certificate, shows
+  in the collector's log and as `pgwatch_instance_up 0`.
+- The paths are part of `conn_str`, and so of the ConfigMap, which the pod of
+  the previous template mounts as well and pgwatch reads again every two
+  minutes. While a rollout that adds certificates is stuck, that pod is
+  given paths it does not have and stops collecting: see [Adding
+  certificates to a running
+  monitor](troubleshooting.md#adding-certificates-to-a-running-monitor). The
+  same is true of every change to `conn_str`; a ConfigMap of its own for
+  each rendered configuration would end it and is not built yet.
 
 ## Metric merge order
 

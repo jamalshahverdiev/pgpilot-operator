@@ -176,6 +176,75 @@ spec:
                     - verify-ca
                     - verify-full
                     type: string
+                  tls:
+                    description: |-
+                      tls names the certificates for the connection: the certificate
+                      authority the server's certificate is checked against, and a client
+                      certificate for a server that asks for one. Whether TLS is used at
+                      all, and how strictly the server is checked, is what sslmode says,
+                      which is "disable" unless it is set: certificates are refused with
+                      an sslmode that would leave them unused.
+                    properties:
+                      caSecretRef:
+                        description: |-
+                          caSecretRef names the Secret with the certificate authority (one or
+                          more PEM certificates) that the server's certificate has to be signed
+                          by. It is what sslmode verify-ca and verify-full check against;
+                          without it they go by the certificate authorities of the pgwatch
+                          image, which are the public ones and know nothing of a private CA.
+                          With sslmode require it makes the collector check the certificate
+                          as verify-ca does.
+                        properties:
+                          key:
+                            default: ca.crt
+                            description: |-
+                              key inside the Secret that holds the PEM certificates. Defaults to
+                              "ca.crt".
+                            maxLength: 253
+                            pattern: ^[-._a-zA-Z0-9]*$
+                            type: string
+                          name:
+                            description: name of the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      clientCertSecretRef:
+                        description: |-
+                          clientCertSecretRef names the Secret with a client certificate and
+                          its private key, for a server that asks for one (pg_hba.conf method
+                          "cert", or clientcert=verify-full). A Secret of type
+                          kubernetes.io/tls has the keys this expects by default.
+                        properties:
+                          certKey:
+                            default: tls.crt
+                            description: |-
+                              certKey is the key inside the Secret that holds the PEM certificate.
+                              Defaults to "tls.crt".
+                            maxLength: 253
+                            pattern: ^[-._a-zA-Z0-9]*$
+                            type: string
+                          keyKey:
+                            default: tls.key
+                            description: |-
+                              keyKey is the key inside the Secret that holds the PEM private key,
+                              not encrypted. Defaults to "tls.key".
+                            maxLength: 253
+                            pattern: ^[-._a-zA-Z0-9]*$
+                            type: string
+                          name:
+                            description: name of the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
                   username:
                     description: |-
                       username is the database user. Prefer credentialsSecret for production
@@ -197,6 +266,15 @@ spec:
                   rule: '!has(self.username) || has(self.password)'
                 - message: username is required when password is set inline
                   rule: '!has(self.password) || has(self.username)'
+                - message: 'tls.caSecretRef needs sslmode require, verify-ca or verify-full:
+                    with any other the server''s certificate is not checked against
+                    it'
+                  rule: '!has(self.tls) || !has(self.tls.caSecretRef) || (has(self.sslmode)
+                    && self.sslmode in [''require'', ''verify-ca'', ''verify-full''])'
+                - message: 'tls.clientCertSecretRef needs an sslmode other than disable:
+                    a connection without TLS presents no certificate'
+                  rule: '!has(self.tls) || !has(self.tls.clientCertSecretRef) || (has(self.sslmode)
+                    && self.sslmode != ''disable'')'
               image:
                 description: image overrides the pgwatch image coordinates.
                 properties:
@@ -559,13 +637,22 @@ spec:
                         type: string
                       tls:
                         description: |-
-                          tls configures optional TLS for the gRPC connection. When nil, the
-                          connection is plaintext.
+                          tls makes the collector connect to the Receiver with TLS. Without
+                          it, or without a caSecretRef in it, the connection is plaintext.
                         properties:
                           caSecretRef:
                             description: |-
                               caSecretRef is the name of a Secret in the same namespace that
-                              contains the CA certificate under the key "ca.crt".
+                              contains, under the key "ca.crt", the certificate authority the
+                              Receiver's certificate has to be signed by. Naming it is what turns
+                              TLS on: the collector then refuses a Receiver whose certificate that
+                              authority did not sign, or that is not for the host in endpoint. The
+                              pod mounts the Secret read-only and is replaced when it changes.
+
+                              The field has no validation of its own: it was stored, and did
+                              nothing, before it had a meaning, and a rule added now would refuse
+                              writes to such monitors. The operator reports a value that is not
+                              the name of a Secret.
                             type: string
                         type: object
                     required:

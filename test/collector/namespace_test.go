@@ -126,7 +126,7 @@ func TestGRPCEnvelopeNamesTheNamespace(t *testing.T) {
 	// A map entry of the envelope: field 1 the key, field 2 the value.
 	entry := []byte("\x0a\x09namespace\x12\x06team-a")
 	delivered := func() bool {
-		for _, message := range sink.received("/UpdateMeasurements") {
+		for _, message := range sink.measurements() {
 			if bytes.Contains(message, []byte("grpc-namespace")) && bytes.Contains(message, entry) {
 				return true
 			}

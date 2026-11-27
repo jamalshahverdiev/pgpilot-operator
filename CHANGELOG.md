@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### TLS certificates
+
+- `spec.database.tls` names the certificates for the connection to the
+  database: `caSecretRef`, the certificate authority the server is checked
+  against, and `clientCertSecretRef`, a client certificate for a server that
+  asks for one. Until now `sslmode: verify-ca` and `verify-full` could only
+  be used with a server whose certificate a public authority had signed: the
+  collector had no way to be given another, and a database with a
+  certificate of an authority of one's own was refused as `certificate
+  signed by unknown authority`.
+- `spec.sinks.grpc.tls.caSecretRef` is used. The field existed and did
+  nothing: the collector connected in plaintext whatever it said, and exited
+  at once at a receiver that only speaks TLS. Naming a Secret now turns TLS
+  on for the sink, with the receiver checked against that authority and the
+  host of `endpoint`.
+- The Secrets are mounted into the collector pod read-only, key by key.
+  Before that the operator checks that each exists, has its keys and holds
+  what pgwatch can load, and says what is wrong in the monitor's status:
+  `SecretNotFound` and `SecretKeyMissing`, for these Secrets with the field
+  that names them, and the new reason `InvalidCertificate`. A certificate
+  and its key can be one value of a Secret (`certKey` and `keyKey` the same).
+- A renewed certificate replaces the collector pod, within the interval at
+  which credentials Secrets are read again (five minutes by default,
+  `--credentials-recheck-interval`): pgwatch reads the files once, when it
+  starts. This works with Secrets that cert-manager writes.
+- The API server refuses certificates with an `sslmode` that would not use
+  them: `tls.caSecretRef` needs `require`, `verify-ca` or `verify-full`,
+  `tls.clientCertSecretRef` anything but `disable`. `sslmode` is `disable`
+  unless it is set.
+
+Upgrade notes:
+
+- **A monitor that already sets `spec.sinks.grpc.tls.caSecretRef` changes
+  behaviour**: its collector connected without TLS and will now use TLS, with
+  the Secret mounted. If the Secret does not exist, has no `ca.crt` or holds
+  no certificate, the monitor reports `SecretNotFound`, `SecretKeyMissing` or
+  `InvalidCertificate` and keeps the collector it has until that is put
+  right; if the receiver does not speak TLS, the new collector exits, the
+  monitor reports `CrashLoopBackOff`, and the pod it had goes on as it was.
+  Remove the field to stay on plaintext. Find such monitors before the
+  upgrade:
+
+  ```bash
+  kubectl get pgpilotmonitors -A -o json | jq -r '.items[]
+    | select((.spec.sinks.grpc.tls.caSecretRef // "") != "")
+    | "\(.metadata.namespace)/\(.metadata.name): \(.spec.sinks.grpc.tls.caSecretRef)"'
+  ```
+- An `endpoint` of the gRPC sink that carries `?sslrootca=<file>` itself,
+  which was the only way to get TLS, keeps working as long as
+  `tls.caSecretRef` is not set; once it is, the Secret is what counts.
+- Adding certificates to a monitor that runs replaces its pod. If the new
+  pod cannot start, the old one stops collecting after a few minutes: the
+  connection string, which both read, then names files only the new pod has.
+  See "Adding certificates to a running monitor" in
+  `docs/troubleshooting.md`.
+- Monitors without certificates are rendered as before; their collectors are
+  not restarted by this change.
+- No change to the operator's role: the Secrets are read with the `get` it
+  already has.
+
 ### Inline credentials
 
 - An inline `spec.database.password` no longer shows in the collector's pod

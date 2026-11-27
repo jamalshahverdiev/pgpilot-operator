@@ -305,7 +305,7 @@ func startCollector(
 			"--add-host", receiverHost + ":host-gateway"},
 		securityFlags(t, pod, container),
 		envFlags(t, container, creds),
-		volumeFlags(t, pod, container, configMap),
+		volumeFlags(t, pod, container, configMap, creds),
 		[]string{container.Image},
 		container.Args,
 	)
@@ -382,8 +382,11 @@ func envFlags(t *testing.T, container corev1.Container, creds secrets) []string 
 	return flags
 }
 
-// volumeFlags mounts the generated ConfigMap and the emptyDir volumes.
-func volumeFlags(t *testing.T, pod corev1.PodSpec, container corev1.Container, configMap *corev1.ConfigMap) []string {
+// volumeFlags mounts the generated ConfigMap, the emptyDir volumes and the
+// Secrets, whose content is read from creds.
+func volumeFlags(
+	t *testing.T, pod corev1.PodSpec, container corev1.Container, configMap *corev1.ConfigMap, creds secrets,
+) []string {
 	t.Helper()
 	volumes := map[string]corev1.Volume{}
 	for _, v := range pod.Volumes {
@@ -405,8 +408,13 @@ func volumeFlags(t *testing.T, pod corev1.PodSpec, container corev1.Container, c
 			flags = append(flags, "--volume", writeConfig(t, configMap.Data)+":"+mount.MountPath+":ro")
 		case volume.EmptyDir != nil:
 			flags = append(flags, "--tmpfs", mount.MountPath)
+		case volume.Secret != nil:
+			if !mount.ReadOnly {
+				t.Errorf("Secret %s is mounted writable", volume.Secret.SecretName)
+			}
+			flags = append(flags, "--volume", writeSecret(t, volume.Secret, creds)+":"+mount.MountPath+":ro")
 		default:
-			t.Fatalf("volume %q: the test only knows ConfigMap and emptyDir volumes", mount.Name)
+			t.Fatalf("volume %q: the test only knows ConfigMap, emptyDir and Secret volumes", mount.Name)
 		}
 	}
 	return flags
@@ -439,6 +447,43 @@ func probedMetricsPort(t *testing.T, container corev1.Container) int32 {
 		}
 	}
 	return metrics
+}
+
+// writeSecret lays a Secret volume out the way the kubelet does: the keys the
+// volume asks for, under the names it gives them, with its file mode. A key
+// the Secret does not have keeps the pod from starting, and fails the test.
+func writeSecret(t *testing.T, source *corev1.SecretVolumeSource, creds secrets) string {
+	t.Helper()
+	held, ok := creds[source.SecretName]
+	if !ok {
+		t.Fatalf("the pod mounts Secret %q, which the test does not have", source.SecretName)
+	}
+	if len(source.Items) == 0 {
+		t.Fatalf("Secret volume %q names no keys; teach the test to mount all of them", source.SecretName)
+	}
+	mode := os.FileMode(0o644)
+	if source.DefaultMode != nil {
+		mode = os.FileMode(*source.DefaultMode)
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range source.Items {
+		value, ok := held[item.Key]
+		if !ok {
+			t.Fatalf("Secret %q has no key %q: the kubelet would not start the pod", source.SecretName, item.Key)
+		}
+		path := filepath.Join(dir, item.Path)
+		if err := os.WriteFile(path, []byte(value), mode); err != nil {
+			t.Fatal(err)
+		}
+		// The mode asked for, whatever the umask of the test is.
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 // writeConfig lays the ConfigMap out the way the kubelet does: one

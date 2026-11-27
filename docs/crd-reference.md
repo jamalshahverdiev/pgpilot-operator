@@ -27,10 +27,11 @@ for them, `pgpilot-<monitor>-credentials`; they are not in its pod template.
 | `host` | string | yes | | PostgreSQL host: DNS name, IPv4 or IPv6 address (brackets optional). The port goes into `port`, not here; max 253 chars |
 | `port` | int32 | no | `5432` | PostgreSQL port (1-65535) |
 | `database` | string | yes | | Logical database name (max 63 chars) |
-| `sslmode` | enum | no | `disable` | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` |
+| `sslmode` | enum | no | `disable` | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full`. Whether the connection uses TLS, and how the server is checked: not at all up to `require`; against a certificate authority with `verify-ca`; against it and the host name with `verify-full`. The authority is the one of `tls.caSecretRef`, without it the public ones of the pgwatch image |
 | `username` | string | no* | | Inline DB username (dev/test only) |
 | `password` | string | no* | | Inline DB password (dev/test only) |
 | `credentialsSecret` | object | no* | | Reference to a Secret (see below) |
+| `tls` | object | no | | Certificates for the connection (see below) |
 | `customTags` | map[string]string | no | | Additional labels added to every measurement. Keys must not be empty, start with `__` or be `dbname` (pgwatch sets it to the monitor name). The operator adds `namespace`, the namespace of the monitor; a `namespace` key set here is replaced by it. Prefer plain label names: on the Prometheus sink any character outside `[a-zA-Z0-9_]` is exported as `_`. Max 32 entries |
 
 *Exactly one of (`username`+`password`) or `credentialsSecret` must be set.
@@ -42,6 +43,53 @@ for them, `pgpilot-<monitor>-credentials`; they are not in its pod template.
 | `name` | string | yes | | Secret name in the same namespace (a valid object name: lower-case letters, digits, `-`, `.`; max 253 chars) |
 | `usernameKey` | string | no | `username` | Key inside the Secret for the database username (letters, digits, `-`, `_`, `.`) |
 | `passwordKey` | string | no | `password` | Key inside the Secret for the database password (letters, digits, `-`, `_`, `.`). The key must exist; its value may be empty |
+
+### spec.database.tls
+
+The Secrets, in the monitor's namespace, that hold the certificates for the
+connection to the database. The collector pod mounts them read-only. The
+operator checks that each exists, has its keys and holds what pgwatch can
+load, reports what is wrong as `SecretNotFound`, `SecretKeyMissing` or
+`InvalidCertificate`, and replaces the pod when one of them changes: see
+[Renewing a certificate](troubleshooting.md#renewing-a-certificate).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `caSecretRef.name` | string | yes | | Secret with the certificate authority the server's certificate has to be signed by: one or more PEM certificates. Needs `sslmode` `require`, `verify-ca` or `verify-full`; with `require` it makes the collector check the server as `verify-ca` does. The API server refuses it with any other `sslmode`, which would leave the server unchecked whatever is named here |
+| `caSecretRef.key` | string | no | `ca.crt` | Key inside that Secret (letters, digits, `-`, `_`, `.`) |
+| `clientCertSecretRef.name` | string | yes | | Secret with a client certificate and its private key, for a server that asks for one (`pg_hba.conf` method `cert`, or `clientcert=verify-full`). A Secret of type `kubernetes.io/tls`, as cert-manager writes it, has the default keys. Refused with `sslmode: disable`: a connection without TLS presents no certificate |
+| `clientCertSecretRef.certKey` | string | no | `tls.crt` | Key of the certificate, PEM, with its chain if it has one |
+| `clientCertSecretRef.keyKey` | string | no | `tls.key` | Key of the private key: PEM, without a passphrase, and the first PEM block of the value. May be the same key as `certKey`, for a Secret that holds both in one value: the private key first, then the certificate |
+
+`caSecretRef` and `clientCertSecretRef` are each optional, and `name` is
+required in the one that is set. None of them can name
+`pgpilot-<monitor>-credentials`, the Secret the operator generates for
+inline credentials (`GeneratedSecretReferenced`).
+
+What the server makes of a client certificate is its own configuration:
+
+- with the `pg_hba.conf` method `cert` the certificate is the login. Its
+  common name has to be the database user, or be mapped to it by the server
+  (`map=`), and no password is asked for. The monitor still needs a
+  `username`, that user, and a `password` key, whose value is not used;
+- with `clientcert=verify-full` on another method (`scram-sha-256`, ...) the
+  certificate is asked for in addition: the common name has to match, and
+  the password has to be the right one as well.
+
+```yaml
+spec:
+  database:
+    host: users-db.team-users.svc.cluster.local
+    database: users
+    sslmode: verify-full
+    credentialsSecret:
+      name: users-db-monitor-creds
+    tls:
+      caSecretRef:
+        name: users-db-ca
+      clientCertSecretRef:
+        name: users-db-monitor-cert
+```
 
 ### spec.metrics
 
@@ -66,7 +114,7 @@ gives a Prometheus endpoint on port 9187. To use the gRPC sink alone, set
 | `prometheus.port` | int32 | no | `9187` | Port for /metrics (1-65535) |
 | `grpc.enabled` | bool | no | `false` | Enable gRPC sink |
 | `grpc.endpoint` | string | when enabled | | gRPC receiver host:port, no whitespace, max 512 chars |
-| `grpc.tls.caSecretRef` | string | no | | Secret name with CA cert (key: `ca.crt`). **Not used yet:** the collector connects to the receiver without TLS whatever is set here, and exits at once if the receiver only speaks TLS |
+| `grpc.tls.caSecretRef` | string | no | | Name of a Secret in the monitor's namespace with, under the key `ca.crt`, the certificate authority the receiver's certificate has to be signed by. Naming it is what turns TLS on: the collector then refuses a receiver that authority did not sign for, or whose certificate is not for the host in `endpoint`. Without it the connection is plaintext, and a receiver that only speaks TLS makes the collector exit at once. The Secret is checked and followed like those of `spec.database.tls`. The API server takes any value here, because the field was stored before it had a meaning; one that is not the name of a Secret is reported as `SecretNotFound`. An `sslrootca` parameter in `endpoint`, the way to name an authority before this field worked, gives way to the Secret |
 
 #### Presets
 

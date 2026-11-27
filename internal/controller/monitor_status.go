@@ -87,6 +87,9 @@ const (
 	reasonSecretKeyMissing = "SecretKeyMissing"
 	reasonSecretReadFailed = "SecretReadFailed"
 	reasonNoCredentials    = "NoCredentials"
+	// A Secret the pod mounts certificates from has the keys it is asked
+	// for, and they do not hold what the collector can load.
+	reasonInvalidCertificate = "InvalidCertificate"
 	// The monitor names, as its own, the Secret the operator generates from
 	// inline credentials and removes when there are none.
 	reasonGeneratedSecretReferenced = "GeneratedSecretReferenced"
