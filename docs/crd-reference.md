@@ -240,7 +240,7 @@ itself.
 |-------|------|-------------|
 | `observedGeneration` | int64 | Last reconciled `.metadata.generation` |
 | `metricCount` | int32 | Number of metric definitions in the library |
-| `conditions` | []Condition | `Valid` — True when library contains metrics |
+| `conditions` | []Condition | `Valid` — `True` when every definition can be used. `False` with reason `InvalidMetric` when a definition stored before a validation rule existed breaks it (the message names the metric and what is wrong; monitors that use the library report `InvalidMetric` too), or with reason `Empty`. The SQL itself is not checked. On Kubernetes before 1.33 the status of a library that breaks a rule cannot be written, and keeps what an earlier release left there (`True`) |
 
 ### Printer columns
 

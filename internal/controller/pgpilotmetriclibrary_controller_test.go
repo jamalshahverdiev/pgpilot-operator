@@ -76,6 +76,49 @@ var _ = Describe("PgpilotMetricLibrary Controller", func() {
 		}, timeout, interval).Should(BeTrue())
 	})
 
+	// With the permissions of the shipped role, and through the manager's
+	// cache: the status is a patch of the status subresource.
+	It("should say how many definitions there are, and follow a change of the library", func() {
+		createForSpec(lib)
+		key := types.NamespacedName{Name: "test-lib", Namespace: ns.Name}
+		reported := func(g Gomega) pgpilotv1.PgpilotMetricLibraryStatus {
+			var l pgpilotv1.PgpilotMetricLibrary
+			g.Expect(k8sClient.Get(context.TODO(), key, &l)).To(Succeed())
+			g.Expect(l.Status.ObservedGeneration).To(Equal(l.Generation))
+			return l.Status
+		}
+		valid := func(message string) OmegaMatcher {
+			return ContainElement(SatisfyAll(
+				HaveField("Type", "Valid"),
+				HaveField("Status", metav1.ConditionTrue),
+				HaveField("Reason", "Valid"),
+				HaveField("Message", message),
+			))
+		}
+
+		Eventually(func(g Gomega) {
+			status := reported(g)
+			g.Expect(status.MetricCount).To(BeEquivalentTo(1))
+			g.Expect(status.Conditions).To(valid("Metric definitions that can be used: 1"))
+		}, timeout, interval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			var l pgpilotv1.PgpilotMetricLibrary
+			g.Expect(k8sClient.Get(context.TODO(), key, &l)).To(Succeed())
+			l.Spec.Metrics = append(l.Spec.Metrics, pgpilotv1.MetricDefinition{
+				Name: "another_metric", SQLs: map[string]string{"0": "SELECT 2"},
+			})
+			g.Expect(k8sClient.Update(context.TODO(), &l)).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			status := reported(g)
+			g.Expect(status.ObservedGeneration).To(BeEquivalentTo(2))
+			g.Expect(status.MetricCount).To(BeEquivalentTo(2))
+			g.Expect(status.Conditions).To(valid("Metric definitions that can be used: 2"))
+		}, timeout, interval).Should(Succeed())
+	})
+
 	It("should set ObservedGeneration on status", func() {
 		createForSpec(lib)
 

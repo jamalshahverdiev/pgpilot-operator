@@ -75,6 +75,9 @@ const (
 	reasonConfigBuildFailed = "ConfigBuildFailed"
 
 	reasonLibraryResolveFailed = "LibraryResolveFailed"
+	// A metric definition, of a library or of the monitor itself, breaks a
+	// rule the API server enforces on new objects.
+	reasonInvalidMetric = "InvalidMetric"
 
 	// The credentials the collector needs are not there.
 	reasonSecretNotFound   = "SecretNotFound"
@@ -289,6 +292,9 @@ func (r *PgpilotMonitorReconciler) finish(
 			}
 			return ctrl.Result{RequeueAfter: staleReadRetry}, nil
 		case err != nil:
+			if apierrors.IsInvalid(err) {
+				r.sayWithoutStatus(ctx, monitor, out)
+			}
 			return ctrl.Result{}, errors.Join(out.err, fmt.Errorf("update status: %w", err))
 		}
 		if monitor.ResourceVersion != stored.ResourceVersion {
@@ -304,6 +310,29 @@ func (r *PgpilotMonitorReconciler) finish(
 		return ctrl.Result{}, out.err
 	}
 	return ctrl.Result{RequeueAfter: out.requeueAfter}, nil
+}
+
+// sayWithoutStatus reports what is wrong with a monitor whose status the API
+// server refuses as invalid. Before Kubernetes 1.33 that is every monitor
+// whose own spec breaks a validation rule, for as long as it does: its
+// stored status stays what it was, READY included, and an event is the one
+// place on the object left to say why nothing is done for it.
+//
+// Unlike a transition, this is recorded at every attempt (the failed write
+// is retried with growing pauses). An event lives for an hour; one recorded
+// once would leave a monitor that claims to be ready and says nothing else.
+// The recorder counts identical events on one object.
+func (r *PgpilotMonitorReconciler) sayWithoutStatus(
+	ctx context.Context,
+	monitor *pgpilotv1.PgpilotMonitor,
+	out outcome,
+) {
+	if out.ready || transitional[out.reason] {
+		return
+	}
+	logf.FromContext(ctx).Info("the monitor is not ready, and its status cannot be written to say so",
+		"reason", out.reason, "message", out.message)
+	r.Recorder.Event(monitor, corev1.EventTypeWarning, out.reason, out.message)
 }
 
 // readIsStale reports whether the monitor just read is the very version the

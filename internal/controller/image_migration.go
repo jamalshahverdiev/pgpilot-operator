@@ -307,7 +307,7 @@ func (m *StoredImageMigration) migrate(
 	if m.Recorder != nil {
 		m.Recorder.Eventf(monitor, corev1.EventTypeNormal, reasonImageDefaultRestored,
 			"Removed image tag %s, which an earlier operator release had written into the spec; "+
-				"the collector now runs the operator's default, %s:%s",
+				"the collector is replaced at the monitor's next successful reconcile by the operator's default, %s:%s",
 			legacyImageTag, builder.DefaultImageRepository, builder.PgwatchVersion)
 	}
 	return true, "", nil

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	pgpilotv1 "github.com/jamalshahverdiev/pgpilot-operator/api/v1"
+	"github.com/jamalshahverdiev/pgpilot-operator/internal/builder"
 )
 
 // mutation changes the spec of an otherwise valid object.
@@ -295,6 +297,16 @@ var _ = Describe("CRD validation rules", func() {
 				"metric names must be unique")
 		})
 
+		// The operator applies the rule itself to lists that were stored
+		// before the API server did; see builder.ValidateMetricDefinitions.
+		It("is refused by the operator's own check as well", func() {
+			same := pgpilotv1.MetricDefinition{Name: "same", SQLs: map[string]string{"14": "SELECT 1 AS value"}}
+			other := pgpilotv1.MetricDefinition{Name: "other", SQLs: map[string]string{"14": "SELECT 1 AS value"}}
+			Expect(builder.ValidateMetricDefinitions([]pgpilotv1.MetricDefinition{same, other, same})).
+				To(MatchError(builder.ErrInvalidMetric))
+			Expect(builder.ValidateMetricDefinitions([]pgpilotv1.MetricDefinition{same, other})).To(Succeed())
+		})
+
 		It("accepts distinct metric names", func() {
 			expectAccepted(library("distinct", validMetric("one"), validMetric("two")))
 			expectAccepted(monitor("distinct", set(map[string]any{"custom": []any{
@@ -318,6 +330,104 @@ var _ = Describe("CRD validation rules", func() {
 			m[key] = value
 			return m
 		}
+
+		// The API server applies these rules to what is written. The operator
+		// applies them itself to definitions that were stored before a rule
+		// existed (builder.ValidateMetricDefinitions). The two must not come
+		// apart: the operator would render what the API server calls invalid,
+		// or refuse a monitor for a definition that can be applied as it is.
+		DescribeTable("the operator's own check of a definition agrees with the API server",
+			func(metric map[string]any, valid bool) {
+				raw, err := json.Marshal(metric)
+				Expect(err).NotTo(HaveOccurred())
+				var typed pgpilotv1.MetricDefinition
+				Expect(json.Unmarshal(raw, &typed)).To(Succeed())
+				verdict := builder.ValidateMetricDefinitions([]pgpilotv1.MetricDefinition{typed})
+
+				for _, obj := range withMetric("parity", metric) {
+					By(obj.GetKind())
+					err := k8sClient.Create(context.TODO(), obj, client.DryRunAll)
+					if valid {
+						Expect(err).NotTo(HaveOccurred(), "the API server must accept it")
+					} else {
+						Expect(apierrors.IsInvalid(err)).To(BeTrue(), "the API server must refuse it, got: %v", err)
+					}
+				}
+				if valid {
+					Expect(verdict).To(Succeed(), "the operator refuses what the API server accepts")
+				} else {
+					Expect(verdict).To(MatchError(builder.ErrInvalidMetric), "the operator accepts what the API server refuses")
+				}
+			},
+			Entry("a plain definition", validMetric("orders"), true),
+			Entry("sqls key: two zeros", metricWith("sqls", map[string]any{"00": "SELECT 1"}), false),
+			Entry("sqls key: three zeros", metricWith("sqls", map[string]any{"000": "SELECT 1"}), false),
+			Entry("sqls key: a digit that is not ASCII", metricWith("sqls", map[string]any{"1\u0664": "SELECT 1"}), false),
+			Entry("sqls: a statement of white space", metricWith("sqls", map[string]any{"14": " \n\t"}), true),
+			Entry("name: trailing newline", validMetric("orders\n"), false),
+			Entry("name: a second line", validMetric("orders\nqueue"), false),
+			Entry("name: upper case in the tail only", validMetric("ordersQueue"), false),
+			Entry("name: upper case at the head only", validMetric("Orders"), false),
+			Entry("name: a letter that is not ASCII", validMetric("ord\u00e9rs"), false),
+			Entry("interval: 1000ms", metricWith("interval", "1000ms"), true),
+			Entry("interval: 1.5s", metricWith("interval", "1.5s"), true),
+			Entry("interval: 0.5m", metricWith("interval", "0.5m"), true),
+			Entry("interval: 999999us", metricWith("interval", "999999us"), false),
+			Entry("isInstanceLevel", metricWith("isInstanceLevel", true), true),
+			Entry("both roles named and false", map[string]any{
+				"name": "probe_metric", "sqls": map[string]any{"14": "SELECT 1"}, "masterOnly": false, "standbyOnly": false,
+			}, true),
+			Entry("name: underscores and digits", validMetric("orders_queue_depth_2"), true),
+			Entry("name: leading underscore", validMetric("_internal"), true),
+			Entry("name: 63 characters", validMetric(strings.Repeat("m", 63)), true),
+			Entry("name: 64 characters", validMetric(strings.Repeat("m", 64)), false),
+			Entry("name: upper case", validMetric("OrdersQueue"), false),
+			Entry("name: dash", validMetric("orders-queue"), false),
+			Entry("name: leading digit", validMetric("1orders"), false),
+			Entry("name: dot", validMetric("orders.queue"), false),
+			Entry("name: space", validMetric("orders queue"), false),
+			Entry("name: empty", validMetric(""), false),
+			Entry("sqls key: zero, the catch-all", metricWith("sqls", map[string]any{"0": "SELECT 1"}), true),
+			Entry("sqls key: single digit", metricWith("sqls", map[string]any{"9": "SELECT 1"}), true),
+			Entry("sqls key: three digits", metricWith("sqls", map[string]any{"100": "SELECT 1"}), true),
+			Entry("sqls key: largest", metricWith("sqls", map[string]any{"999": "SELECT 1"}), true),
+			Entry("sqls: several versions",
+				metricWith("sqls", map[string]any{"0": "SELECT 1", "14": "SELECT 2", "17": "SELECT 3"}), true),
+			Entry("sqls key: wildcard", metricWith("sqls", map[string]any{"*": "SELECT 1"}), false),
+			Entry("sqls key: wildcard next to a version", metricWith("sqls", map[string]any{"14": "SELECT 1", "*": "SELECT 1"}), false),
+			Entry("sqls key: minor version", metricWith("sqls", map[string]any{"14.2": "SELECT 1"}), false),
+			Entry("sqls key: v prefix", metricWith("sqls", map[string]any{"v14": "SELECT 1"}), false),
+			Entry("sqls key: plus sign", metricWith("sqls", map[string]any{"+14": "SELECT 1"}), false),
+			Entry("sqls key: leading zero", metricWith("sqls", map[string]any{"014": "SELECT 1"}), false),
+			Entry("sqls key: negative", metricWith("sqls", map[string]any{"-1": "SELECT 1"}), false),
+			Entry("sqls key: leading space", metricWith("sqls", map[string]any{" 14": "SELECT 1"}), false),
+			Entry("sqls key: trailing newline", metricWith("sqls", map[string]any{"14\n": "SELECT 1"}), false),
+			Entry("sqls key: empty", metricWith("sqls", map[string]any{"": "SELECT 1"}), false),
+			Entry("sqls key: word", metricWith("sqls", map[string]any{"latest": "SELECT 1"}), false),
+			Entry("sqls key: four digits", metricWith("sqls", map[string]any{"1000": "SELECT 1"}), false),
+			Entry("sqls key: server_version_num form", metricWith("sqls", map[string]any{"170000": "SELECT 1"}), false),
+			Entry("sqls: an empty statement", metricWith("sqls", map[string]any{"14": ""}), false),
+			Entry("sqls: an empty statement next to a good one", metricWith("sqls", map[string]any{"14": "SELECT 1", "15": ""}), false),
+			Entry("sqls: no statement at all", metricWith("sqls", map[string]any{}), false),
+			Entry("primary only", metricWith("masterOnly", true), true),
+			Entry("standby only", metricWith("standbyOnly", true), true),
+			Entry("both roles", map[string]any{
+				"name": "probe_metric", "sqls": map[string]any{"14": "SELECT 1"}, "masterOnly": true, "standbyOnly": true,
+			}, false),
+			Entry("both roles named, one of them off", map[string]any{
+				"name": "probe_metric", "sqls": map[string]any{"14": "SELECT 1"}, "masterOnly": true, "standbyOnly": false,
+			}, true),
+			Entry("interval: one second", metricWith("interval", "1s"), true),
+			Entry("interval: a week", metricWith("interval", "168h"), true),
+			Entry("interval: just below one second", metricWith("interval", "999ms"), false),
+			Entry("interval: zero", metricWith("interval", "0s"), false),
+			Entry("interval: negative", metricWith("interval", "-30s"), false),
+			Entry("the ignored statementTimeoutSeconds", metricWith("statementTimeoutSeconds", int64(5)), true),
+			Entry("gauges and a description", map[string]any{
+				"name": "probe_metric", "sqls": map[string]any{"14": "SELECT 1"},
+				"gauges": []any{"*"}, "description": "Anything at all: 14.2, *, OrdersQueue",
+			}, true),
+		)
 
 		// The name becomes a key in pgwatch's metrics.yaml and the prefix of
 		// every Prometheus series of the metric.

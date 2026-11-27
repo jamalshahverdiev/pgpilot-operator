@@ -168,7 +168,10 @@ spec:
               conditions:
                 description: |-
                   conditions reflects the current state of the library.
-                  Typical types: "Valid" (syntactic validation of SQL/markers passes).
+                  "Valid" is True when every metric definition passes the rules of this
+                  CRD and can be handed to a collector, and False otherwise, with reason
+                  InvalidMetric (the message names the metric) or Empty. The SQL itself
+                  is not checked.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
